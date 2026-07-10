@@ -1601,6 +1601,14 @@ SILDeserializer::readKeyPathComponent(ArrayRef<uint64_t> ListOfValues,
   case KeyPathComponentKindEncoding::OptionalWrap:
     return KeyPathPatternComponent::forOptional(
         KeyPathPatternComponent::Kind::OptionalWrap, type);
+  case KeyPathComponentKindEncoding::EnumCase: {
+    auto id = handleComputedId();
+    auto extractName = MF->getIdentifierText(ListOfValues[nextValue++]);
+    auto extract = getFuncForReference(extractName);
+    auto embedName = MF->getIdentifierText(ListOfValues[nextValue++]);
+    auto embed = getFuncForReference(embedName);
+    return KeyPathPatternComponent::forEnumCase(id, extract, embed, type);
+  }
   case KeyPathComponentKindEncoding::TupleElement:
     return KeyPathPatternComponent::forTupleElement(
         ListOfValues[nextValue++], type);

@@ -219,7 +219,9 @@ public:
     assert(component.getKind() ==
            KeyPathPatternComponent::Kind::GettableProperty ||
            component.getKind() ==
-           KeyPathPatternComponent::Kind::SettableProperty);
+           KeyPathPatternComponent::Kind::SettableProperty ||
+           component.getKind() ==
+           KeyPathPatternComponent::Kind::EnumCase);
     assert(accessType == AccessType::Get && "property is not settable");
 
     parent->project(accessType, [&](SILValue parentValue) {
@@ -642,6 +644,7 @@ private:
         break;
       case KeyPathPatternComponent::Kind::GettableProperty:
       case KeyPathPatternComponent::Kind::Method:
+      case KeyPathPatternComponent::Kind::EnumCase:
         projector = std::make_unique<GettablePropertyProjector>
             (keyPath, comp, std::move(parent), keyPath->getSubstitutions(),
              beginAccess, loc, builder);

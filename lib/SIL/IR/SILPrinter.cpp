@@ -3367,21 +3367,7 @@ public:
         *this << ']';
       };
 
-    switch (auto kind = component.getKind()) {
-    case KeyPathPatternComponent::Kind::StoredProperty: {
-      auto prop = component.getStoredPropertyDecl();
-      *this << "stored_property #";
-      printValueDecl(prop, PrintState.OS);
-      *this << " : $" << component.getComponentType();
-      break;
-    }
-    case KeyPathPatternComponent::Kind::GettableProperty:
-    case KeyPathPatternComponent::Kind::SettableProperty:
-    case KeyPathPatternComponent::Kind::Method: {
-      *this << (kind == KeyPathPatternComponent::Kind::GettableProperty
-                  ? "gettable_property $" : "settable_property $")
-            << component.getComponentType() << ", "
-            << " id ";
+    auto printComputedPropertyId = [&] {
       auto id = component.getComputedPropertyId();
       switch (id.getKind()) {
       case KeyPathPatternComponent::ComputedPropertyId::DeclRef: {
@@ -3401,6 +3387,24 @@ public:
         break;
       }
       }
+    };
+
+    switch (auto kind = component.getKind()) {
+    case KeyPathPatternComponent::Kind::StoredProperty: {
+      auto prop = component.getStoredPropertyDecl();
+      *this << "stored_property #";
+      printValueDecl(prop, PrintState.OS);
+      *this << " : $" << component.getComponentType();
+      break;
+    }
+    case KeyPathPatternComponent::Kind::GettableProperty:
+    case KeyPathPatternComponent::Kind::SettableProperty:
+    case KeyPathPatternComponent::Kind::Method: {
+      *this << (kind == KeyPathPatternComponent::Kind::GettableProperty
+                  ? "gettable_property $" : "settable_property $")
+            << component.getComponentType() << ", "
+            << " id ";
+      printComputedPropertyId();
       *this << ", getter ";
       component.getComputedPropertyForGettable()->printName(PrintState.OS);
       *this << " : "
@@ -3432,6 +3436,20 @@ public:
         }
       }
       
+      break;
+    }
+    case KeyPathPatternComponent::Kind::EnumCase: {
+      *this << "enum_case $" << component.getComponentType()
+            << ", id ";
+      printComputedPropertyId();
+      *this << ", extract ";
+      component.getEnumCaseExtractFunction()->printName(PrintState.OS);
+      *this << " : "
+            << component.getEnumCaseExtractFunction()->getLoweredType();
+      *this << ", embed ";
+      component.getEnumCaseEmbedFunction()->printName(PrintState.OS);
+      *this << " : "
+            << component.getEnumCaseEmbedFunction()->getLoweredType();
       break;
     }
     case KeyPathPatternComponent::Kind::OptionalWrap:

@@ -1079,6 +1079,14 @@ SILSerializer::writeKeyPathPatternComponent(
   case KeyPathPatternComponent::Kind::OptionalWrap:
     handleComponentCommon(KeyPathComponentKindEncoding::OptionalWrap);
     break;
+  case KeyPathPatternComponent::Kind::EnumCase:
+    handleComponentCommon(KeyPathComponentKindEncoding::EnumCase);
+    handleComputedId(component.getComputedPropertyId());
+    ListOfValues.push_back(
+        addSILFunctionRef(component.getEnumCaseExtractFunction()));
+    ListOfValues.push_back(
+        addSILFunctionRef(component.getEnumCaseEmbedFunction()));
+    break;
   case KeyPathPatternComponent::Kind::TupleElement:
     handleComponentCommon(KeyPathComponentKindEncoding::TupleElement);
     ListOfValues.push_back((unsigned)component.getTupleIndex());

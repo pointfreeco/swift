@@ -450,6 +450,34 @@ std::string ASTMangler::mangleKeyPathSetterThunkHelper(
   return finalize();
 }
 
+std::string ASTMangler::mangleKeyPathCaseExtractThunkHelper(
+    const EnumElementDecl *element, GenericSignature signature,
+    CanType baseType, SubstitutionMap subs, ResilienceExpansion expansion) {
+  beginMangling();
+  appendEntity(element);
+  if (signature)
+    appendGenericSignature(signature);
+  appendType(baseType, signature);
+  appendOperator("TK");
+  if (expansion == ResilienceExpansion::Minimal)
+    appendOperator("q");
+  return finalize();
+}
+
+std::string ASTMangler::mangleKeyPathCaseEmbedThunkHelper(
+    const EnumElementDecl *element, GenericSignature signature,
+    CanType baseType, SubstitutionMap subs, ResilienceExpansion expansion) {
+  beginMangling();
+  appendEntity(element);
+  if (signature)
+    appendGenericSignature(signature);
+  appendType(baseType, signature);
+  appendOperator("Tk");
+  if (expansion == ResilienceExpansion::Minimal)
+    appendOperator("q");
+  return finalize();
+}
+
 std::string ASTMangler::mangleKeyPathAppliedMethodThunkHelper(
     const AbstractFunctionDecl *method, GenericSignature signature,
     CanType baseType, SubstitutionMap subs, ResilienceExpansion expansion) {

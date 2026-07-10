@@ -290,7 +290,8 @@ public:
 enum class KeyPathMutability : uint8_t {
   ReadOnly,
   Writable,
-  ReferenceWritable
+  ReferenceWritable,
+  CaseReadOnly
 };
 
 using KeyPathCapability = std::pair<KeyPathMutability, /*isSendable=*/bool>;
@@ -4397,6 +4398,14 @@ Type getDynamicSelfReplacementType(Type baseObjTy, const ValueDecl *member,
                                    ConstraintLocator *memberLocator);
 
 ValueDecl *getOverloadChoiceDecl(Constraint *choice);
+
+/// Compute the type projected by an enum case key path component.
+Type getEnumCaseKeyPathComponentType(ASTContext &ctx, Type openedType,
+                                     EnumElementDecl *element);
+
+/// Whether the key path component this locator refers to is immediately
+/// followed by an argument application, e.g. the `foo` of `\E.foo(0)`.
+bool isAppliedKeyPathComponent(ConstraintLocator *locator);
 
 /// Determine whether this type is considered `Sendable` when captured
 /// i.e. a base type of a partially applied member reference.

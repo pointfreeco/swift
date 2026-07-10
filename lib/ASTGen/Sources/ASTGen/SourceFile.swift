@@ -91,6 +91,7 @@ extension Parser.ExperimentalFeatures {
     mapFeature(.CoroutineAccessors, to: .coroutineAccessors)
     mapFeature(.OldOwnershipOperatorSpellings, to: .oldOwnershipOperatorSpellings)
     mapFeature(.KeyPathWithMethodMembers, to: .keypathWithMethodMembers)
+    mapFeature(.CaseKeyPaths, to: .caseKeyPaths)
     mapFeature(.DefaultIsolationPerFile, to: .defaultIsolationPerFile)
     mapFeature(.BorrowAndMutateAccessors, to: .borrowAndMutateAccessors)
     mapFeature(.LiteralExpressions, to: .literalExpressions)

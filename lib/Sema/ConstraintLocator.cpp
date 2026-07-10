@@ -636,6 +636,20 @@ bool ConstraintLocator::isForKeyPathDynamicMemberLookup() const {
   return !path.empty() && path.back().isKeyPathDynamicMember();
 }
 
+bool ConstraintLocator::isForCaseKeyPathDynamicMemberLookup() const {
+  auto path = getPath();
+  if (path.empty())
+    return false;
+
+  if (auto elt = path.back().getAs<LocatorPathElt::KeyPathDynamicMember>()) {
+    auto *keyPathDecl = elt->getKeyPathDecl();
+    return keyPathDecl &&
+           keyPathDecl == keyPathDecl->getASTContext().getCaseKeyPathDecl();
+  }
+
+  return false;
+}
+
 bool ConstraintLocator::isInKeyPathComponent() const {
   return llvm::any_of(getPath(), [&](const LocatorPathElt &elt) {
     return elt.isKeyPathComponent();

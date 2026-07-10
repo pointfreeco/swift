@@ -1,0 +1,27 @@
+// First parse this and then emit a *.sib. Then read in the *.sib, then recreate
+// RUN: %empty-directory(%t)
+// RUN: %target-sil-opt %s -enable-experimental-feature CaseKeyPaths -emit-sib -o %t/tmp.sib -module-name keypaths
+// RUN: %target-sil-opt %t/tmp.sib -enable-experimental-feature CaseKeyPaths -emit-sib -o %t/tmp.2.sib -module-name keypaths
+// RUN: %target-sil-opt %t/tmp.2.sib -enable-experimental-feature CaseKeyPaths -module-name keypaths -emit-sorted-sil | %FileCheck %s
+
+// REQUIRES: swift_feature_CaseKeyPaths
+
+sil_stage canonical
+
+import Swift
+
+enum E {
+  case one(Int)
+  case two
+}
+
+sil @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>
+sil @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E
+
+// CHECK-LABEL: sil shared [serialized] @case_keypath
+// CHECK: keypath $CaseKeyPath<E, Int>, (root $E; enum_case $Optional<Int>, id #E.one!enumelt : {{.*}}, extract @extract : {{.*}}, embed @embed : {{.*}})
+sil shared [serialized] @case_keypath : $@convention(thin) () -> @owned CaseKeyPath<E, Int> {
+bb0:
+  %0 = keypath $CaseKeyPath<E, Int>, (root $E; enum_case $Optional<Int>, id #E.one!enumelt : (E.Type) -> (Int) -> E, extract @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>, embed @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E)
+  return %0
+}

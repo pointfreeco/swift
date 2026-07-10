@@ -678,6 +678,97 @@ void verifyKeyPathComponent(SILModule &M,
 
       checkIndexEqualsAndHash();
     }
+
+    break;
+  }
+  case KeyPathPatternComponent::Kind::EnumCase: {
+    auto payloadTy = componentTy.getOptionalObjectType();
+    require((bool)payloadTy,
+            "enum case component should project an Optional of the payload");
+    auto loweredPayloadTy =
+        M.Types.getLoweredType(opaque, payloadTy, typeExpansionContext);
+
+    require(component.getArguments().empty()
+            && !component.getIndexEquals() && !component.getIndexHash(),
+            "enum case component should not have indices");
+
+    // IRGen keys enum case components on the case's tag.
+    auto id = component.getComputedPropertyId();
+    require(id.getKind() ==
+                    KeyPathPatternComponent::ComputedPropertyId::DeclRef &&
+                isa<EnumElementDecl>(id.getDeclRef().getDecl()),
+            "enum case component id must be an enum element");
+    auto *element = cast<EnumElementDecl>(id.getDeclRef().getDecl());
+    require(element->getParentEnum() == baseTy->getEnumOrBoundGenericEnum(),
+            "enum case component id must be a case of the base enum");
+
+    // Mirrors the type checker's payload shaping.
+    Type shapedPayloadTy = TupleType::getEmpty(M.getASTContext());
+    if (auto *params = element->getParameterList()) {
+      if (params->size() == 1) {
+        shapedPayloadTy = params->get(0)->getInterfaceType();
+      } else {
+        SmallVector<TupleTypeElt, 4> elts;
+        for (auto *param : *params)
+          elts.emplace_back(param->getInterfaceType(),
+                            param->getArgumentName());
+        shapedPayloadTy = TupleType::get(elts, M.getASTContext());
+      }
+      shapedPayloadTy = shapedPayloadTy.subst(
+          baseTy->getContextSubstitutionMap(element->getParentEnum()));
+    }
+    require(shapedPayloadTy->getCanonicalType() ==
+                payloadTy->getCanonicalType(),
+            "enum case component type must be an Optional of the id's "
+            "payload");
+
+    // Extract and embed should both be
+    // <Sig...> @convention(keypath_accessor_getter)
+    //   (@in_guaranteed In) -> @out Out
+    auto checkEnumCaseAccessor = [&](SILFunction *accessor,
+                                     SILType loweredInTy,
+                                     SILType loweredOutTy) {
+      if (expansion == ResilienceExpansion::Minimal) {
+        require(serializedKind != IsNotSerialized &&
+                accessor->hasValidLinkageForFragileRef(serializedKind),
+                "Key path in serialized function should not reference "
+                "less visible enum case accessors");
+      }
+
+      auto substAccessorType = accessor->getLoweredFunctionType()
+        ->substGenericArgs(M, patternSubs, TypeExpansionContext::minimal());
+      require(substAccessorType->getRepresentation() ==
+                SILFunctionTypeRepresentation::KeyPathAccessorGetter,
+              "enum case accessor should be a keypath getter convention");
+
+      require(substAccessorType->getNumParameters() == 1,
+              "enum case accessor should have one parameter");
+      auto param = substAccessorType->getParameters()[0];
+      require(param.getConvention()
+                == ParameterConvention::Indirect_In_Guaranteed,
+              "enum case accessor parameter should be in_guaranteed");
+      require(getTypeInExpansionContext(param.getArgumentType(
+                  M, substAccessorType, typeExpansionContext)) ==
+                  getTypeInExpansionContext(loweredInTy.getASTType()),
+              "enum case accessor parameter should match the maximal "
+              "abstraction of its formal input type");
+
+      require(substAccessorType->getNumResults() == 1,
+              "enum case accessor should have one result");
+      auto result = substAccessorType->getResults()[0];
+      require(result.getConvention() == ResultConvention::Indirect,
+              "enum case accessor result should be @out");
+      require(getTypeInExpansionContext(result.getReturnValueType(
+                  M, substAccessorType, typeExpansionContext)) ==
+                  getTypeInExpansionContext(loweredOutTy.getASTType()),
+              "enum case accessor result should match the maximal "
+              "abstraction of its formal output type");
+    };
+
+    checkEnumCaseAccessor(component.getEnumCaseExtractFunction(),
+                          loweredBaseTy, loweredComponentTy);
+    checkEnumCaseAccessor(component.getEnumCaseEmbedFunction(),
+                          loweredPayloadTy, loweredBaseTy);
     
     break;
   }
@@ -6263,7 +6354,8 @@ public:
     require(kpBGT, "keypath result must be a generic type");
     require(kpBGT->isKeyPath() ||
             kpBGT->isWritableKeyPath() ||
-            kpBGT->isReferenceWritableKeyPath(),
+            kpBGT->isReferenceWritableKeyPath() ||
+            kpBGT->isCaseKeyPath(),
             "keypath result must be a key path type");
     
     auto baseTy = CanType(kpBGT->getGenericArgs()[0]);
@@ -6276,6 +6368,30 @@ public:
         "keypath root type should match root type of keypath pattern");
 
     auto leafTy = CanType(kpBGT->getGenericArgs()[1]);
+    if (kpBGT->isCaseKeyPath()) {
+      leafTy = CanType(OptionalType::get(leafTy)->getCanonicalType());
+      // Runtime class selection depends on this exact shape:
+      // case (chain case)*
+      bool expectCase = true;
+      for (auto &component : pattern->getComponents()) {
+        require(component.getKind() ==
+                    (expectCase ? KeyPathPatternComponent::Kind::EnumCase
+                                : KeyPathPatternComponent::Kind::OptionalChain),
+                "CaseKeyPath pattern must alternate enum case and "
+                "optional chain components");
+        expectCase = !expectCase;
+      }
+      require(!expectCase,
+              "CaseKeyPath pattern must end in an enum case component");
+    }
+
+    if (kpBGT->isWritableKeyPath() || kpBGT->isReferenceWritableKeyPath()) {
+      for (auto &component : pattern->getComponents()) {
+        require(component.getKind() != KeyPathPatternComponent::Kind::EnumCase,
+                "writable key path pattern cannot contain an enum case "
+                "component");
+      }
+    }
     requireSameType(
         F.getLoweredType(leafTy).getASTType(),
         F.getLoweredType(
@@ -6294,6 +6410,7 @@ public:
           break;
         
         case KeyPathPatternComponent::Kind::StoredProperty:
+        case KeyPathPatternComponent::Kind::EnumCase:
         case KeyPathPatternComponent::Kind::OptionalChain:
         case KeyPathPatternComponent::Kind::OptionalWrap:
         case KeyPathPatternComponent::Kind::OptionalForce:

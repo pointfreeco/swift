@@ -1151,6 +1151,19 @@ static Type getKeyPathType(ASTContext &ctx, KeyPathCapability capability,
     keyPathTy = BoundGenericType::get(ctx.getReferenceWritableKeyPathDecl(),
                                       /*parent=*/Type(), {rootType, valueType});
     break;
+
+  case KeyPathMutability::CaseReadOnly: {
+    auto *caseKeyPathDecl = ctx.getCaseKeyPathDecl();
+    auto payloadTy = valueType->getOptionalObjectType();
+    if (caseKeyPathDecl && payloadTy) {
+      keyPathTy = BoundGenericType::get(caseKeyPathDecl, /*parent=*/Type(),
+                                        {rootType, payloadTy});
+    } else {
+      keyPathTy = BoundGenericType::get(ctx.getKeyPathDecl(), /*parent=*/Type(),
+                                        {rootType, valueType});
+    }
+    break;
+  }
   }
 
   if (isSendable &&
@@ -1221,7 +1234,8 @@ bool BindingSet::finalizeKeyPathBindings() {
           // Capability inference always results in a maximum mutability
           // but if context is read-only it can be downgraded to avoid
           // conversions.
-          if (isContextualTypeReadOnly)
+          if (isContextualTypeReadOnly &&
+              capability->first != KeyPathMutability::CaseReadOnly)
             capability =
                 std::make_pair(KeyPathMutability::ReadOnly, capability->second);
 
@@ -1232,8 +1246,12 @@ bool BindingSet::finalizeKeyPathBindings() {
           // capability) and we always want to infer value from
           // the key path and match it to a contextual type to produce
           // better diagnostics.
-          auto keyPathTy = getKeyPathType(ctx, *capability, rootTy,
-                                          CS.getKeyPathValueType(keyPath));
+          Type valueTy = CS.getKeyPathValueType(keyPath);
+          // Forming a case key path's class type requires the resolved
+          // value type in order to unwrap its payload.
+          if (capability->first == KeyPathMutability::CaseReadOnly)
+            valueTy = CS.simplifyType(valueTy);
+          auto keyPathTy = getKeyPathType(ctx, *capability, rootTy, valueTy);
           updatedBindings.push_back({keyPathTy, AllowedBindingKind::Fallback, locator,
                                     /*originator=*/nullptr});
         } else if (CS.shouldAttemptFixes()) {

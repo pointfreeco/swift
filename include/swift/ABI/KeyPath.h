@@ -222,6 +222,26 @@ public:
   }
   
   constexpr static KeyPathComponentHeader
+  forEnumCaseComponent(ComputedPropertyIDKind idKind,
+                       bool hasArguments,
+                       ComputedPropertyIDResolution resolution) {
+    return KeyPathComponentHeader(
+      (_SwiftKeyPathComponentHeader_ComputedTag
+        << _SwiftKeyPathComponentHeader_DiscriminatorShift)
+      | _SwiftKeyPathComponentHeader_ComputedEnumCaseFlag
+      | (idKind == StoredPropertyIndex
+           ? _SwiftKeyPathComponentHeader_ComputedIDByStoredPropertyFlag : 0)
+      | (idKind == VTableOffset
+           ? _SwiftKeyPathComponentHeader_ComputedIDByVTableOffsetFlag : 0)
+      | (hasArguments ? _SwiftKeyPathComponentHeader_ComputedHasArgumentsFlag : 0)
+      | (resolution == Resolved ? _SwiftKeyPathComponentHeader_ComputedIDResolved
+       : resolution == ResolvedAbsolute ? _SwiftKeyPathComponentHeader_ComputedIDResolvedAbsolute
+       : resolution == IndirectPointer ? _SwiftKeyPathComponentHeader_ComputedIDUnresolvedIndirectPointer
+       : resolution == FunctionCall ? _SwiftKeyPathComponentHeader_ComputedIDUnresolvedFunctionCall
+       : (assert(false && "invalid resolution"), 0)));
+  }
+
+  constexpr static KeyPathComponentHeader
   forExternalComponent(unsigned numSubstitutions) {
     return assert(numSubstitutions <
         (1u << _SwiftKeyPathComponentHeader_DiscriminatorShift) - 1u

@@ -22,6 +22,7 @@
 #include "Explosion.h"
 #include "GenClass.h"
 #include "GenDecl.h"
+#include "GenEnum.h"
 #include "GenMeta.h"
 #include "GenPointerAuth.h"
 #include "GenProto.h"
@@ -98,46 +99,15 @@ irgen::bindPolymorphicArgumentsFromComponentIndices(IRGenFunction &IGF,
 }
 
 static llvm::Function *
-getAccessorForComputedComponent(IRGenModule &IGM,
-                                const KeyPathPatternComponent &component,
-                                KeyPathAccessor whichAccessor) {
-  SILFunction *accessor;
-  switch (whichAccessor) {
-  case Getter:
-    accessor = component.getComputedPropertyForGettable();
-    break;
-  case Setter:
-    accessor = component.getComputedPropertyForSettable();
-    break;
-  case Equals:
-    accessor = component.getIndexEquals();
-    break;
-  case Hash:
-    accessor = component.getIndexHash();
-    break;
-  }
+getAccessorFunctionForKeyPathComponent(IRGenModule &IGM,
+                                       SILFunction *accessor,
+                                       const char *thunkName) {
   // If the accessor is locally available, we can use it as is.
   // If it's only externally available, we need a local thunk to relative-
   // reference.
   if (!isAvailableExternally(accessor->getLinkage()) &&
       &IGM == IGM.IRGen.getGenModule(accessor)) {
     return IGM.getAddrOfSILFunction(accessor, NotForDefinition);
-  }
-
-  const char *thunkName;
-  switch (whichAccessor) {
-  case Getter:
-    thunkName = "keypath_get";
-    break;
-  case Setter:
-    thunkName = "keypath_set";
-    break;
-  case Equals:
-    thunkName = "keypath_equals";
-    break;
-  case Hash:
-    thunkName = "keypath_hash";
-    break;
   }
 
   auto accessorFn = IGM.getAddrOfSILFunction(accessor, NotForDefinition);
@@ -163,6 +133,33 @@ getAccessorForComputedComponent(IRGenModule &IGM,
   }
   
   return accessorThunk;
+}
+
+static llvm::Function *
+getAccessorForComputedComponent(IRGenModule &IGM,
+                                const KeyPathPatternComponent &component,
+                                KeyPathAccessor whichAccessor) {
+  SILFunction *accessor;
+  const char *thunkName;
+  switch (whichAccessor) {
+  case Getter:
+    accessor = component.getComputedPropertyForGettable();
+    thunkName = "keypath_get";
+    break;
+  case Setter:
+    accessor = component.getComputedPropertyForSettable();
+    thunkName = "keypath_set";
+    break;
+  case Equals:
+    accessor = component.getIndexEquals();
+    thunkName = "keypath_equals";
+    break;
+  case Hash:
+    accessor = component.getIndexHash();
+    thunkName = "keypath_hash";
+    break;
+  }
+  return getAccessorFunctionForKeyPathComponent(IGM, accessor, thunkName);
 }
 
 static llvm::Function *
@@ -564,6 +561,29 @@ getInitializerForComputedComponent(IRGenModule &IGM,
   return initFn;
 }
 
+static void emitGenericArgumentFieldsForComputedComponent(
+    IRGenModule &IGM, ConstantStructBuilder &fields,
+    const KeyPathPatternComponent &component,
+    ArrayRef<KeyPathIndexOperand> operands, GenericEnvironment *genericEnv,
+    ArrayRef<GenericRequirement> requirements) {
+  fields.addCompactFunctionReference(
+    getLayoutFunctionForComputedComponent(IGM, component,
+                                          genericEnv, requirements));
+
+  if (auto witnessTable =
+        getWitnessTableForComputedComponent(IGM, component,
+                                            genericEnv, requirements)) {
+    fields.addRelativeAddress(witnessTable);
+  } else {
+    // A null reference lets the runtime fill in the prefab witness table.
+    fields.addInt32(0);
+  }
+
+  fields.addCompactFunctionReference(
+    getInitializerForComputedComponent(IGM, component, operands,
+                                       genericEnv, requirements));
+}
+
 static llvm::Constant *
 emitMetadataTypeRefForKeyPath(IRGenModule &IGM, CanType type,
                               CanGenericSignature sig) {
@@ -599,6 +619,42 @@ static unsigned getClassFieldIndex(ClassDecl *classDecl, VarDecl *property) {
   }
 
   llvm_unreachable("Did not find stored property in class");
+}
+
+static void lowerEnumCaseKeyPathComponentId(
+    IRGenModule &IGM, EnumElementDecl *element,
+    KeyPathComponentHeader::ComputedPropertyIDKind &idKind,
+    llvm::Constant *&idValue,
+    KeyPathComponentHeader::ComputedPropertyIDResolution &idResolution) {
+  auto *parentEnum = element->getParentEnum();
+  if (parentEnum->isResilient()) {
+    // Resilient cases can be reordered, so resolve the tag at instantiation
+    // time from the enum case tag global emitted by the defining module.
+    idKind = KeyPathComponentHeader::Pointer;
+    SmallString<64> fnName("keypath_get_enum_tag_");
+    fnName += LinkEntity::forEnumCase(element).mangleAsString(IGM.Context);
+    auto fn = IGM.getOrCreateHelperFunction(fnName, IGM.Int8PtrTy,
+                                            {IGM.Int8PtrTy},
+                                            [element](IRGenFunction &subIGF) {
+      auto addr = subIGF.IGM.getAddrOfEnumCase(element, NotForDefinition);
+      auto *tag = subIGF.Builder.CreateLoad(addr);
+      auto *value = subIGF.Builder.CreateZExt(tag, subIGF.IGM.SizeTy);
+      auto *ptr = subIGF.Builder.CreateIntToPtr(value, subIGF.IGM.Int8PtrTy);
+      subIGF.Builder.CreateRet(ptr);
+    });
+
+    idValue = fn;
+    idResolution = KeyPathComponentHeader::FunctionCall;
+  } else {
+    // The runtime's tag for the case, which also indexes the enum's
+    // reflection metadata.
+    auto enumTy =
+        parentEnum->getDeclaredTypeInContext()->getCanonicalType();
+    auto tag = getEnumImplStrategy(IGM, enumTy).getTagIndex(element);
+    idKind = KeyPathComponentHeader::StoredPropertyIndex;
+    idValue = llvm::ConstantInt::get(IGM.SizeTy, tag);
+    idResolution = KeyPathComponentHeader::Resolved;
+  }
 }
 
 static void
@@ -860,6 +916,12 @@ emitKeyPathComponent(IRGenModule &IGM,
     case KeyPathPatternComponent::ComputedPropertyId::DeclRef: {
       auto declRef = id.getDeclRef();
     
+      if (auto *element = dyn_cast<EnumElementDecl>(declRef.getDecl())) {
+        lowerEnumCaseKeyPathComponentId(IGM, element, idKind, idValue,
+                                        idResolution);
+        break;
+      }
+
       // Foreign method refs identify using a selector
       // reference, which is doubly-indirected and filled in with a unique
       // pointer by dyld.
@@ -1015,30 +1077,46 @@ emitKeyPathComponent(IRGenModule &IGM,
       // If there's generic context or subscript indexes, embed as
       // arguments in the component. Thunk the SIL-level accessors to give the
       // runtime implementation a polymorphically-callable interface.
+      emitGenericArgumentFieldsForComputedComponent(IGM, fields, component,
+                                                    operands, genericEnv,
+                                                    requirements);
+    }
+    break;
+  }
+  case KeyPathPatternComponent::Kind::EnumCase: {
+    auto id = component.getComputedPropertyId();
+    assert(id.getKind() ==
+               KeyPathPatternComponent::ComputedPropertyId::DeclRef &&
+           "enum case component must be identified by an enum element");
+    auto *element = cast<EnumElementDecl>(id.getDeclRef().getDecl());
 
-      fields.addCompactFunctionReference(
-        getLayoutFunctionForComputedComponent(IGM, component,
-                                              genericEnv, requirements));
+    KeyPathComponentHeader::ComputedPropertyIDKind idKind;
+    llvm::Constant *idValue;
+    KeyPathComponentHeader::ComputedPropertyIDResolution idResolution;
+    lowerEnumCaseKeyPathComponentId(IGM, element, idKind, idValue,
+                                    idResolution);
       
-      // Set up a "witness table" for the component that handles copying,
-      // destroying, equating, and hashing the captured contents of the
-      // component.
-      if (auto witnessTable =
-            getWitnessTableForComputedComponent(IGM, component,
-                                                genericEnv, requirements)) {
-        fields.addRelativeAddress(witnessTable);
-      } else {
-        // If there are only generic parameters, we can use a prefab witness
-        // table from the runtime. Leaving a null reference here will let
-        // the runtime fill it in.
-        fields.addInt32(0);
-      }
+    auto header = KeyPathComponentHeader::forEnumCaseComponent(
+      idKind, !isInstantiableOnce, idResolution);
       
-      // Add an initializer function that copies generic arguments out of the
-      // pattern argument buffer into the instantiated object.
-      fields.addCompactFunctionReference(
-        getInitializerForComputedComponent(IGM, component, operands,
-                                           genericEnv, requirements));
+    fields.addInt32(header.getData());
+    if (idKind == KeyPathComponentHeader::StoredPropertyIndex) {
+      fields.add(llvm::ConstantExpr::getTruncOrBitCast(idValue, IGM.Int32Ty));
+    } else {
+      fields.addRelativeAddress(idValue);
+    }
+
+    // Push the extract and embed functions.
+    fields.addCompactFunctionReference(getAccessorFunctionForKeyPathComponent(
+      IGM, component.getEnumCaseExtractFunction(), "keypath_get"));
+    fields.addCompactFunctionReference(getAccessorFunctionForKeyPathComponent(
+      IGM, component.getEnumCaseEmbedFunction(), "keypath_embed"));
+
+    if (!isInstantiableOnce) {
+      // If there's generic context, embed it as arguments in the component.
+      emitGenericArgumentFieldsForComputedComponent(IGM, fields, component,
+                                                    operands, genericEnv,
+                                                    requirements);
     }
     break;
   }
@@ -1177,6 +1255,7 @@ IRGenModule::getAddrOfKeyPathPattern(KeyPathPattern *pattern,
       }
       break;
     case KeyPathPatternComponent::Kind::StoredProperty:
+    case KeyPathPatternComponent::Kind::EnumCase:
     case KeyPathPatternComponent::Kind::OptionalChain:
     case KeyPathPatternComponent::Kind::OptionalForce:
     case KeyPathPatternComponent::Kind::OptionalWrap:
@@ -1457,6 +1536,11 @@ struct StaticKeyPathComponentLayout {
     /// (`_SwiftKeyPathComponentHeader_ComputedTag`).  See `computedKind`
     /// for the get-only vs settable-mutating vs settable-nonmutating split.
     Computed,
+    /// Enum case component: a get-only computed component with the
+    /// enum-case flag, identified by the case's tag, where `getter` is the
+    /// extract function and `setter` holds the embed function, which
+    /// occupies the setter's slot and is signed like a getter.
+    EnumCase,
   };
 
   Kind kind;
@@ -1469,7 +1553,8 @@ struct StaticKeyPathComponentLayout {
   /// For `StructOrTuple` / `Class`: byte offset of the field within its
   /// container.  The emitter picks between inline-in-header and
   /// out-of-line-trailing-word encoding via
-  /// `KeyPathComponentHeader::offsetCanBeInline`.  Unused for `Computed`.
+  /// `KeyPathComponentHeader::offsetCanBeInline`.  For `EnumCase`: the
+  /// case's tag.  Unused for `Computed`.
   uint32_t offset = 0;
 
   /// For `Computed`: whether the component is get-only (also used for
@@ -1481,11 +1566,13 @@ struct StaticKeyPathComponentLayout {
 
   /// For `Computed`: the getter SIL function pointer.  Used both as the
   /// component's `id` (unsigned identity) and as the ptr-auth-signed
-  /// getter slot.  Null for stored components.
+  /// getter slot.  For `EnumCase`: the extract function (the tag in
+  /// `offset` is the id).  Null for stored components.
   llvm::Constant *getter = nullptr;
 
   /// For `Computed`: the setter SIL function pointer, when
-  /// `computedKind != GetOnly`.  Null otherwise.
+  /// `computedKind != GetOnly`.  For `EnumCase`: the embed function.
+  /// Null otherwise.
   llvm::Constant *setter = nullptr;
 };
 } // end anonymous namespace
@@ -1575,6 +1662,20 @@ computeStaticKeyPathComponentLayout(IRGenModule &IGM,
     }
     return layout;
   }
+  case KeyPathPatternComponent::Kind::EnumCase: {
+    layout.kind = StaticKeyPathComponentLayout::Kind::EnumCase;
+    auto *element = cast<EnumElementDecl>(
+        comp.getComputedPropertyId().getDeclRef().getDecl());
+    auto enumTy = element->getParentEnum()
+                      ->getDeclaredTypeInContext()
+                      ->getCanonicalType();
+    layout.offset = getEnumImplStrategy(IGM, enumTy).getTagIndex(element);
+    layout.getter = IGM.getAddrOfSILFunction(
+        comp.getEnumCaseExtractFunction(), NotForDefinition);
+    layout.setter = IGM.getAddrOfSILFunction(
+        comp.getEnumCaseEmbedFunction(), NotForDefinition);
+    return layout;
+  }
   default:
     llvm_unreachable("caller should have filtered other kinds");
   }
@@ -1621,6 +1722,12 @@ encodeStaticKeyPathComponentHeader(
                 layout.computedKind, KeyPathComponentHeader::Pointer,
                 /*hasArguments=*/false, KeyPathComponentHeader::Resolved),
             std::nullopt};
+
+  case StaticKeyPathComponentLayout::Kind::EnumCase:
+    return {KeyPathComponentHeader::forEnumCaseComponent(
+                KeyPathComponentHeader::StoredPropertyIndex,
+                /*hasArguments=*/false, KeyPathComponentHeader::Resolved),
+            std::nullopt};
   }
   llvm_unreachable("unhandled StaticKeyPathComponentLayout::Kind");
 }
@@ -1664,10 +1771,12 @@ llvm::Constant *IRGenModule::emitStaticKeyPathInstance(KeyPathInst *KPI) {
         KeyPathComponentHeader::forOptionalForce()}; // arbitrary default
     std::optional<uint32_t> outOfLineOffsetWord;
     bool isComputed = false;
-    // Fields relevant to computed components (only possible when
-    // numComponents == 1).
+    bool isEnumCase = false;
+    // Fields relevant to computed and enum case components (only
+    // possible when numComponents == 1).
     KeyPathComponentHeader::ComputedPropertyKind computedKind =
         KeyPathComponentHeader::GetOnly;
+    uint32_t enumCaseTag = 0;
     llvm::Constant *getter = nullptr;
     llvm::Constant *setter = nullptr;
     // Metadata pointer for the intermediate type following this
@@ -1688,8 +1797,12 @@ llvm::Constant *IRGenModule::emitStaticKeyPathInstance(KeyPathInst *KPI) {
     step.header = hdr;
     step.outOfLineOffsetWord = offsetWord;
     step.isComputed =
-        layout.kind == StaticKeyPathComponentLayout::Kind::Computed;
+        layout.kind == StaticKeyPathComponentLayout::Kind::Computed ||
+        layout.kind == StaticKeyPathComponentLayout::Kind::EnumCase;
+    step.isEnumCase =
+        layout.kind == StaticKeyPathComponentLayout::Kind::EnumCase;
     step.computedKind = layout.computedKind;
+    step.enumCaseTag = layout.offset;
     step.getter = layout.getter;
     step.setter = layout.setter;
 
@@ -1726,7 +1839,8 @@ llvm::Constant *IRGenModule::emitStaticKeyPathInstance(KeyPathInst *KPI) {
   //   comp[N-1] body
   //
   // For computed components (single-component patterns only) the body is
-  // `pointerAlignmentSkew + id + getter + [setter]`.
+  // `pointerAlignmentSkew + id + getter + [setter]`; for enum case
+  // components, `pointerAlignmentSkew + tag + extract + embed`.
   uint32_t componentBytes = 0;
   for (size_t i = 0; i < numComponents; ++i) {
     const auto &step = steps[i];
@@ -1834,7 +1948,11 @@ llvm::Constant *IRGenModule::emitStaticKeyPathInstance(KeyPathInst *KPI) {
             llvm::ArrayType::get(Int8Ty, pointerAlignmentSkewBytes)));
         bytesInData += pointerAlignmentSkewBytes;
       }
-      fields.add(llvm::ConstantExpr::getBitCast(step.getter, Int8PtrTy));
+      if (step.isEnumCase) {
+        fields.addInt(IntPtrTy, step.enumCaseTag);
+      } else {
+        fields.add(llvm::ConstantExpr::getBitCast(step.getter, Int8PtrTy));
+      }
       bytesInData += ptrSize;
 
       auto schema = getOptions().PointerAuth.KeyPaths;
@@ -1843,8 +1961,11 @@ llvm::Constant *IRGenModule::emitStaticKeyPathInstance(KeyPathInst *KPI) {
       bytesInData += ptrSize;
 
       if (step.setter) {
+        // An enum case's embed function occupies the setter's slot and is
+        // signed like a getter.
         auto setterAuth =
-            step.computedKind == KeyPathComponentHeader::SettableMutating
+            step.isEnumCase ? PointerAuthEntity::Special::KeyPathGetter
+            : step.computedKind == KeyPathComponentHeader::SettableMutating
                 ? PointerAuthEntity::Special::KeyPathMutatingSetter
                 : PointerAuthEntity::Special::KeyPathNonmutatingSetter;
         fields.addSignedPointer(step.setter, schema, setterAuth);

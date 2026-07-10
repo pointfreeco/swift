@@ -2558,7 +2558,7 @@ BoundGenericType *KeyPathExpr::getKeyPathType() const {
     assert(sendableTy->getMembers().size() == 2);
     type = sendableTy->getExistentialLayout().explicitSuperclass;
     assert(type->isKeyPath() || type->isWritableKeyPath() ||
-           type->isReferenceWritableKeyPath());
+           type->isReferenceWritableKeyPath() || type->isCaseKeyPath());
   }
 
   return type->castTo<BoundGenericType>();

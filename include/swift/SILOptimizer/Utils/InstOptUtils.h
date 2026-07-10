@@ -593,6 +593,8 @@ bool specializeAppliesInFunction(SILFunction &F,
 
 bool tryOptimizeKeypath(ApplyInst *AI, SILBuilder Builder);
 bool tryOptimizeKeypathApplication(ApplyInst *AI, SILFunction *callee, SILBuilder Builder);
+bool tryOptimizeKeypathCaseEmbed(ApplyInst *AI, SILFunction *callee,
+                                 SILBuilder Builder);
 bool tryOptimizeKeypathOffsetOf(ApplyInst *AI, FuncDecl *calleeFn,
                                 KeyPathInst *kp, SILBuilder Builder);
 bool tryOptimizeKeypathKVCString(ApplyInst *AI, FuncDecl *calleeFn,

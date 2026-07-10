@@ -231,6 +231,7 @@ bool GlobalAccessRemoval::visitInstruction(SILInstruction *I) {
       case KeyPathPatternComponent::Kind::GettableProperty:
       case KeyPathPatternComponent::Kind::SettableProperty:
       case KeyPathPatternComponent::Kind::Method:
+      case KeyPathPatternComponent::Kind::EnumCase:
       case KeyPathPatternComponent::Kind::OptionalChain:
       case KeyPathPatternComponent::Kind::OptionalForce:
       case KeyPathPatternComponent::Kind::OptionalWrap:

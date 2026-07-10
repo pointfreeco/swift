@@ -1,0 +1,127 @@
+// RUN: %empty-directory(%t)
+// RUN: split-file %s %t
+// RUN: not --crash %target-sil-opt -enable-experimental-feature CaseKeyPaths %t/not_a_case.sil -o /dev/null 2>&1 | %FileCheck %t/not_a_case.sil
+// RUN: not --crash %target-sil-opt -enable-experimental-feature CaseKeyPaths %t/writable.sil -o /dev/null 2>&1 | %FileCheck %t/writable.sil
+// RUN: not --crash %target-sil-opt -enable-experimental-feature CaseKeyPaths %t/wrong_enum_id.sil -o /dev/null 2>&1 | %FileCheck %t/wrong_enum_id.sil
+// RUN: not --crash %target-sil-opt -enable-experimental-feature CaseKeyPaths %t/wrong_payload_id.sil -o /dev/null 2>&1 | %FileCheck %t/wrong_payload_id.sil
+// RUN: not --crash %target-sil-opt -enable-experimental-feature CaseKeyPaths %t/trailing_chain.sil -o /dev/null 2>&1 | %FileCheck %t/trailing_chain.sil
+// REQUIRES: swift_feature_CaseKeyPaths
+// REQUIRES: asserts
+
+//--- not_a_case.sil
+
+// A keypath instruction of CaseKeyPath type whose pattern is not enum case
+// components alternating with optional chains must be rejected: runtime
+// class selection depends on that exact shape.
+
+sil_stage canonical
+
+import Swift
+
+struct S {
+  var x: Int?
+}
+
+// CHECK: CaseKeyPath pattern must alternate enum case and optional chain components
+sil @not_a_case : $@convention(thin) () -> @owned CaseKeyPath<S, Int> {
+bb0:
+  %0 = keypath $CaseKeyPath<S, Int>, (root $S; stored_property #S.x : $Optional<Int>)
+  return %0
+}
+
+//--- writable.sil
+
+// Enum case components are get-only; a writable key path class can never
+// contain one.
+
+sil_stage canonical
+
+import Swift
+
+enum E {
+  case one(Int)
+  case two
+}
+
+sil @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>
+sil @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E
+
+// CHECK: writable key path pattern cannot contain an enum case component
+sil @writable : $@convention(thin) () -> @owned WritableKeyPath<E, Optional<Int>> {
+bb0:
+  %0 = keypath $WritableKeyPath<E, Optional<Int>>, (root $E; enum_case $Optional<Int>, id #E.one!enumelt : (E.Type) -> (Int) -> E, extract @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>, embed @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E)
+  return %0
+}
+
+//--- wrong_enum_id.sil
+
+// The id must be a case of the base enum.
+
+sil_stage canonical
+
+import Swift
+
+enum E {
+  case one(Int)
+  case two
+}
+
+enum F {
+  case uno(Int)
+}
+
+sil @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>
+sil @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E
+
+// CHECK: enum case component id must be a case of the base enum
+sil @wrong_enum : $@convention(thin) () -> @owned CaseKeyPath<E, Int> {
+bb0:
+  %0 = keypath $CaseKeyPath<E, Int>, (root $E; enum_case $Optional<Int>, id #F.uno!enumelt : (F.Type) -> (Int) -> F, extract @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>, embed @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E)
+  return %0
+}
+
+//--- wrong_payload_id.sil
+
+// The component must project the id's shaped payload.
+
+sil_stage canonical
+
+import Swift
+
+enum E {
+  case one(Int)
+  case two
+}
+
+sil @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>
+sil @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E
+
+// CHECK: enum case component type must be an Optional of the id's payload
+sil @wrong_case : $@convention(thin) () -> @owned CaseKeyPath<E, Int> {
+bb0:
+  %0 = keypath $CaseKeyPath<E, Int>, (root $E; enum_case $Optional<Int>, id #E.two!enumelt : (E.Type) -> E, extract @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>, embed @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E)
+  return %0
+}
+
+//--- trailing_chain.sil
+
+// The pattern must end in an enum case component.
+
+sil_stage canonical
+
+import Swift
+
+enum E {
+  case one(Int)
+  case two
+}
+
+sil @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>
+sil @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E
+
+// CHECK: CaseKeyPath pattern must end in an enum case component
+sil @trailing_chain : $@convention(thin) () -> @owned CaseKeyPath<E, Int> {
+bb0:
+  %0 = keypath $CaseKeyPath<E, Int>, (root $E; enum_case $Optional<Int>, id #E.one!enumelt : (E.Type) -> (Int) -> E, extract @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>, embed @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E; optional_chain : $Int)
+  return %0
+}

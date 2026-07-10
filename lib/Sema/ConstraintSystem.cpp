@@ -5153,6 +5153,17 @@ ConstraintSystem::inferKeyPathLiteralCapability(KeyPathExpr *keyPath) {
   };
 
   auto mutability = KeyPathMutability::Writable;
+  // A key path composed entirely of enum case components, each chained
+  // into the next case's payload — `case (chain case)*` — is a
+  // `CaseKeyPath`; any other path involving one is read-only.
+  unsigned numEnumCaseComponents = 0;
+  bool sawNonEnumCaseComponent = false;
+  enum {
+    CaseShapeStart,
+    CaseShapeAfterCase,
+    CaseShapeAfterChain,
+    CaseShapeBroken
+  } caseShape = CaseShapeStart;
   for (unsigned i : indices(keyPath->getComponents())) {
     auto &component = keyPath->getComponents()[i];
 
@@ -5169,6 +5180,7 @@ ConstraintSystem::inferKeyPathLiteralCapability(KeyPathExpr *keyPath) {
     case KeyPathExpr::Component::Kind::UnresolvedApply: {
       if (!isKnownSendability(component))
         return delay();
+      sawNonEnumCaseComponent = true;
       break;
     }
     case KeyPathExpr::Component::Kind::UnresolvedSubscript:
@@ -5195,6 +5207,7 @@ ConstraintSystem::inferKeyPathLiteralCapability(KeyPathExpr *keyPath) {
       // tuple elements do not change the capability of the key path
       auto choice = overload->choice;
       if (choice.getKind() == OverloadChoiceKind::TupleIndex) {
+        sawNonEnumCaseComponent = true;
         continue;
       }
 
@@ -5207,6 +5220,19 @@ ConstraintSystem::inferKeyPathLiteralCapability(KeyPathExpr *keyPath) {
           hasFixFor(componentLoc,
                     FixKind::UnwrapOptionalBaseWithOptionalResult))
         return fail();
+
+      if (isa<EnumElementDecl>(choice.getDecl())) {
+        if (!Context.LangOpts.hasFeature(Feature::CaseKeyPaths))
+          return fail();
+        ++numEnumCaseComponents;
+        caseShape = (caseShape == CaseShapeStart ||
+                     caseShape == CaseShapeAfterChain)
+                        ? CaseShapeAfterCase
+                        : CaseShapeBroken;
+        continue;
+      }
+
+      sawNonEnumCaseComponent = true;
 
       auto *storageDecl = dyn_cast<AbstractStorageDecl>(choice.getDecl());
       if (!isa<AbstractFunctionDecl>(choice.getDecl()) && !storageDecl) {
@@ -5251,15 +5277,22 @@ ConstraintSystem::inferKeyPathLiteralCapability(KeyPathExpr *keyPath) {
 
     case KeyPathExpr::Component::Kind::OptionalChain:
       didOptionalChain = true;
+      // A chain projecting a case's payload continues a case key path.
+      if (caseShape == CaseShapeAfterCase)
+        caseShape = CaseShapeAfterChain;
+      else
+        sawNonEnumCaseComponent = true;
       break;
 
     case KeyPathExpr::Component::Kind::OptionalForce:
       // Forcing an optional preserves its lvalue-ness.
+      sawNonEnumCaseComponent = true;
       break;
 
     case KeyPathExpr::Component::Kind::OptionalWrap:
       // An optional chain should already have been recorded.
       assert(didOptionalChain);
+      sawNonEnumCaseComponent = true;
       break;
 
     case KeyPathExpr::Component::Kind::TupleElement:
@@ -5276,6 +5309,20 @@ ConstraintSystem::inferKeyPathLiteralCapability(KeyPathExpr *keyPath) {
   if (didOptionalChain)
     mutability = KeyPathMutability::ReadOnly;
 
+  if (numEnumCaseComponents > 0) {
+    // Deployment targets without runtime support get the back-deployed
+    // form: a plain read-only key path.
+    bool caseKeyPathAvailable =
+        Context.LangOpts.DisableAvailabilityChecking ||
+        AvailabilityRange::forDeploymentTarget(Context).isContainedIn(
+            Context.getCaseKeyPathsAvailability());
+    bool isCaseShape =
+        !sawNonEnumCaseComponent && caseShape == CaseShapeAfterCase;
+    mutability = (isCaseShape && caseKeyPathAvailable)
+                     ? KeyPathMutability::CaseReadOnly
+                     : KeyPathMutability::ReadOnly;
+  }
+
   return success(mutability, isSendable);
 }
 
@@ -5283,6 +5330,58 @@ ValueDecl *constraints::getOverloadChoiceDecl(Constraint *choice) {
   if (choice->getKind() != ConstraintKind::BindOverload)
     return nullptr;
   return choice->getOverloadChoice().getDeclOrNull();
+}
+
+Type constraints::getEnumCaseKeyPathComponentType(ASTContext &ctx,
+                                                  Type openedType,
+                                                  EnumElementDecl *element) {
+  Type payloadTy;
+  if (auto *fnTy = openedType->getAs<AnyFunctionType>()) {
+    auto params = fnTy->getParams();
+    if (params.size() == 1) {
+      // A single associated value projects as the value itself; a label,
+      // if any, is dropped.
+      payloadTy = params[0].getPlainType();
+    } else {
+      // Labels come from the declaration because canonical function types
+      // do not retain argument labels.
+      auto *paramList = element->getParameterList();
+      assert(paramList && paramList->size() == params.size());
+      SmallVector<TupleTypeElt, 4> elts;
+      for (unsigned i : indices(params))
+        elts.push_back(TupleTypeElt(params[i].getPlainType(),
+                                    paramList->get(i)->getArgumentName()));
+      payloadTy = TupleType::get(elts, ctx);
+    }
+  } else {
+    // Cases without a payload project as `Void`.
+    payloadTy = ctx.TheEmptyTupleType;
+  }
+
+  return OptionalType::get(payloadTy);
+}
+
+bool constraints::isAppliedKeyPathComponent(ConstraintLocator *locator) {
+  auto *keyPath = getAsExpr<KeyPathExpr>(locator->getAnchor());
+  if (!keyPath)
+    return false;
+
+  auto component = locator->findLast<LocatorPathElt::KeyPathComponent>();
+  if (!component)
+    return false;
+
+  auto components = keyPath->getComponents();
+  auto next = component->getIndex() + 1;
+  if (next >= components.size())
+    return false;
+
+  switch (components[next].getKind()) {
+  case KeyPathExpr::Component::Kind::Apply:
+  case KeyPathExpr::Component::Kind::UnresolvedApply:
+    return true;
+  default:
+    return false;
+  }
 }
 
 bool constraints::isOperatorDisjunction(Constraint *disjunction) {

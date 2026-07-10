@@ -816,6 +816,91 @@ public class ReferenceWritableKeyPath<
   }
 }
 
+/// A key path that supports reading the associated values of an enum case,
+/// and embedding associated values into an enum value.
+@available(SwiftStdlib 6.5, *)
+public class CaseKeyPath<Root, Value>: KeyPath<Root, Value?> {
+  @usableFromInline
+  internal final func _embed(_ payload: Value) -> Root {
+    return unsafe withBuffer {
+      var buffer = unsafe $0
+      unsafe _internalInvariant(!buffer.data.isEmpty,
+                   "case key path has no components")
+      let (firstComponent, firstNextType) = unsafe buffer.next()
+      if _fastPath(firstNextType == nil) {
+        // A single case component embeds `Value` directly into `Root`.
+        return firstComponent._projectEnumCaseEmbed(payload: payload,
+                                                    to: Root.self)
+      }
+
+#if !hasFeature(Embedded)
+      // Composed case key paths alternate case and optional-chain components:
+      //   [case] [Optional<Mid>] [chain] [Mid] [case] ...
+      // Apply the embed functions in reverse, innermost case first.
+      var components: [RawKeyPathComponent] = []
+      var enumTypes: [Any.Type] = []
+      var payloadTypes: [Any.Type] = []
+      var currentBase: Any.Type = Root.self
+      var component = firstComponent
+      var optNextType = firstNextType
+      while true {
+        if component.header.isComputedEnumCase {
+          components.append(component)
+          enumTypes.append(currentBase)
+          // Placeholder; overwritten if an optional-chain component follows.
+          payloadTypes.append(Value.self)
+        } else if component.header.kind == .optionalChain,
+                  let nextBase = optNextType,
+                  !components.isEmpty {
+          payloadTypes[payloadTypes.count &- 1] = nextBase
+          currentBase = nextBase
+        } else {
+          _preconditionFailure("unexpected component in case key path")
+        }
+        if optNextType == nil { break }
+        (component, optNextType) = unsafe buffer.next()
+      }
+
+      // Intermediate types are only known dynamically; stage values as `Any`.
+      var value: Any = payload
+      for i in (0 ..< components.count).reversed() {
+        let caseComponent = components[i]
+        func embed1<Enum>(_: Enum.Type) -> Any {
+          func embed2<Payload>(_: Payload.Type) -> Any {
+            return caseComponent._projectEnumCaseEmbed(
+              payload: value as! Payload,
+              to: Enum.self)
+          }
+          return _openExistential(payloadTypes[i], do: embed2)
+        }
+        value = _openExistential(enumTypes[i], do: embed1)
+      }
+      return value as! Root
+#else
+      _preconditionFailure("composed case key paths are unsupported in embedded Swift")
+#endif
+    }
+  }
+
+  /// Creates an enum value by embedding `value` as this case's
+  /// associated value.
+  ///
+  /// - Parameter value: The associated value to embed.
+  @_semantics("keypath.caseEmbed")
+  @inlinable
+  public final func callAsFunction(_ value: Value) -> Root {
+    return _embed(value)
+  }
+
+  /// Creates the enum value represented by this case, which has no
+  /// associated values.
+  @_semantics("keypath.caseEmbed")
+  @inlinable
+  public final func callAsFunction() -> Root where Value == Void {
+    return _embed(())
+  }
+}
+
 // MARK: Implementation details
 
 internal enum KeyPathComponentKind {
@@ -905,6 +990,13 @@ internal struct ComputedAccessorsPtr {
 #endif
     return unsafe _value + MemoryLayout<Int>.size
   }
+  internal var enumCaseEmbedPtr: UnsafeRawPointer {
+#if INTERNAL_CHECKS_ENABLED
+    _internalInvariant(header.isComputedEnumCase,
+                 "not an enum case component")
+#endif
+    return unsafe _value + MemoryLayout<Int>.size
+  }
 
   internal func getter<CurValue, NewValue>()
       -> Getter<CurValue, NewValue> {
@@ -936,6 +1028,18 @@ internal struct ComputedAccessorsPtr {
     return unsafe setterPtr._loadAddressDiscriminatedFunctionPointer(
       as: MutatingSetter.self,
       discriminator: ComputedAccessorsPtr.mutatingSetterPtrAuthKey)
+  }
+
+  internal func enumCaseEmbed<PayloadValue, EnumValue>()
+      -> Getter<PayloadValue, EnumValue> {
+#if INTERNAL_CHECKS_ENABLED
+    _internalInvariant(header.isComputedEnumCase,
+                 "not an enum case component")
+#endif
+
+    return unsafe enumCaseEmbedPtr._loadAddressDiscriminatedFunctionPointer(
+      as: Getter.self,
+      discriminator: ComputedAccessorsPtr.getterPtrAuthKey)
   }
 }
 
@@ -1612,6 +1716,16 @@ internal struct RawKeyPathComponent {
       return _value & Header.computedSettableFlag != 0
     }
 
+    // An enum case component is a computed get-only component with this flag
+    // set; its getter is the case's extract function, and one extra word
+    // after the getter holds the case's embed function.
+    internal static var computedEnumCaseFlag: UInt32 {
+      return _SwiftKeyPathComponentHeader_ComputedEnumCaseFlag
+    }
+    internal var isComputedEnumCase: Bool {
+      return kind == .computed && _value & Header.computedEnumCaseFlag != 0
+    }
+
     internal static var computedIDByStoredPropertyFlag: UInt32 {
       return _SwiftKeyPathComponentHeader_ComputedIDByStoredPropertyFlag
     }
@@ -1746,6 +1860,10 @@ internal struct RawKeyPathComponent {
         if isComputedSettable {
           size &+= 4
         }
+        // An enum case component also holds the embed function.
+        if isComputedEnumCase {
+          size &+= 4
+        }
         // If there are arguments, there's also a layout function,
         // witness table, and initializer function.
         // Property descriptors never carry argument information, though.
@@ -1851,6 +1969,10 @@ internal struct RawKeyPathComponent {
       if header.isComputedSettable {
         total &+= ptrSize
       }
+      // additional word for an enum case component's embed function
+      if header.isComputedEnumCase {
+        total &+= ptrSize
+      }
       // include the argument size
       if header.hasComputedArguments {
         // two words for argument header: size, witnesses
@@ -1911,7 +2033,7 @@ internal struct RawKeyPathComponent {
     return unsafe body.baseAddress._unsafelyUnwrappedUnchecked
       + Header.pointerAlignmentSkew
       + MemoryLayout<Int>.size &*
-         (header.isComputedSettable ? 3 : 2)
+         (header.isComputedSettable || header.isComputedEnumCase ? 3 : 2)
   }
 
   internal var _computedArgumentSize: ComputedArgumentSize {
@@ -2067,6 +2189,15 @@ internal struct RawKeyPathComponent {
             discriminator: header.isComputedMutating
               ? ComputedAccessorsPtr.mutatingSetterPtrAuthKey
               : ComputedAccessorsPtr.nonmutatingSetterPtrAuthKey)
+        componentSize += MemoryLayout<Int>.size
+      }
+
+      if header.isComputedEnumCase {
+        // The embed function is signed like the getter.
+        unsafe (buffer.baseAddress.unsafelyUnwrapped + MemoryLayout<Int>.size * 3)
+          ._copyAddressDiscriminatedFunctionPointer(
+            from: accessors.enumCaseEmbedPtr,
+            discriminator: ComputedAccessorsPtr.getterPtrAuthKey)
         componentSize += MemoryLayout<Int>.size
       }
 
@@ -2287,6 +2418,30 @@ internal struct RawKeyPathComponent {
 #else
       fatalError("Embedded Swift does not allow optionals in key paths")
 #endif
+    }
+  }
+
+  // Invoke the embed function to build an enum value from a payload value.
+  internal func _projectEnumCaseEmbed<PayloadValue, EnumValue>(
+    payload: PayloadValue,
+    to _: EnumValue.Type
+  ) -> EnumValue {
+    _internalInvariant(header.isComputedEnumCase,
+                 "not an enum case component")
+    switch value {
+    case .get(id: _, accessors: let accessors, argument: let argument):
+      let embed: ComputedAccessorsPtr.Getter<PayloadValue, EnumValue> =
+        unsafe accessors.enumCaseEmbed()
+
+      return unsafe embed(
+        payload,
+        argument?.data.baseAddress ?? accessors._value,
+        argument?.data.count ?? 0
+      )
+
+    default:
+      _internalInvariantFailure(
+        "enum case component should be a get-only computed component")
     }
   }
 
@@ -3040,6 +3195,24 @@ extension _AppendKeyPath /* where Self == ReferenceWritableKeyPath<T,U> */ {
   }
 }
 
+@_unavailableInEmbedded
+extension _AppendKeyPath /* where Self == CaseKeyPath<T,U> */ {
+  /// Returns a new case key path created by appending the given case key
+  /// path to this one.
+  ///
+  /// - Parameter path: The case key path to append.
+  /// - Returns: A case key path from the root of this key path to the
+  ///   associated value type of `path`.
+  @available(SwiftStdlib 6.5, *)
+  @inlinable
+  public func appending<Root, Value, AppendedValue>(
+    path: CaseKeyPath<Value, AppendedValue>
+  ) -> CaseKeyPath<Root, AppendedValue>
+  where Self == CaseKeyPath<Root, Value> {
+    return _appendingCaseKeyPaths(root: self, leaf: path)
+  }
+}
+
 /// Updates information pertaining to the types associated with each KeyPath.
 ///
 /// Note: Currently we only distinguish between keypaths that traverse
@@ -3098,7 +3271,8 @@ internal func calculateAppendedKeyPathSize(
   _ root: AnyKeyPath,
   _ leaf: AnyKeyPath,
   _ rootBuffer: KeyPathBuffer,
-  _ leafBuffer: KeyPathBuffer
+  _ leafBuffer: KeyPathBuffer,
+  insertingOptionalChainAtJoint: Bool = false
 ) -> (Int, Int, Int, Int, Int, Int) {
   var result = MemoryLayout<Int>.size // Header size (padding if needed)
   var resultWithObjectHeaderAndKVC: Int {
@@ -3110,6 +3284,14 @@ internal func calculateAppendedKeyPathSize(
   // Align up the root so that we can put the component type after it.
   result &+= unsafe MemoryLayout<Int>._roundingUpToAlignment(rootBuffer.data.count)
   result &+= MemoryLayout<Int>.size // Middle type
+
+  if insertingOptionalChainAtJoint {
+    // Optional-chain component at the joint: a 4-byte header, then a second,
+    // pointer-aligned middle type.
+    result &+= MemoryLayout<RawKeyPathComponent.Header>.size
+    result = MemoryLayout<Int>._roundingUpToAlignment(result)
+    result &+= MemoryLayout<Int>.size // Second middle type
+  }
 
   var leafIter = unsafe leafBuffer
   while true {
@@ -3127,6 +3309,11 @@ internal func calculateAppendedKeyPathSize(
       result &+= MemoryLayout<Int>.size &* 2
 
       if component.header.isComputedSettable {
+        result &+= MemoryLayout<Int>.size
+      }
+
+      // An enum case component's embed function
+      if component.header.isComputedEnumCase {
         result &+= MemoryLayout<Int>.size
       }
 
@@ -3363,6 +3550,118 @@ internal func _appendingKeyPaths<
     leaf: leaf
   )
   return returnValue as! Result
+}
+
+// Appends two case key paths, inserting an optional-chain component at the
+// joint:
+//   [root's components] [Optional<Mid>] [chain] [Mid] [leaf's components]
+@_unavailableInEmbedded
+@available(SwiftStdlib 6.5, *)
+@usableFromInline
+internal func _appendingCaseKeyPaths<Root, Mid, Leaf>(
+  root: CaseKeyPath<Root, Mid>,
+  leaf: CaseKeyPath<Mid, Leaf>
+) -> CaseKeyPath<Root, Leaf> {
+  return unsafe root.withBuffer {
+    var rootBuffer = unsafe $0
+    return unsafe leaf.withBuffer {
+      var leafBuffer = unsafe $0
+
+      // A case key path always has at least one component.
+      unsafe _internalInvariant(
+        !rootBuffer.data.isEmpty && !leafBuffer.data.isEmpty,
+        "case key path has no components")
+
+      let (
+        _,
+        totalResultSize,
+        componentSize,
+        appendedKVCLength,
+        _,
+        _
+      ) = unsafe calculateAppendedKeyPathSize(
+        root,
+        leaf,
+        rootBuffer,
+        leafBuffer,
+        insertingOptionalChainAtJoint: true
+      )
+      // Case key paths are never KVC-compatible.
+      _internalInvariant(appendedKVCLength == 0,
+                   "case key path should not have a KVC string")
+
+      return unsafe CaseKeyPath<Root, Leaf>._create(
+        capacityInBytes: totalResultSize
+      ) {
+        var destBuilder = unsafe KeyPathBuffer.Builder($0)
+
+        // Case components are get-only computed, so no reference prefix.
+        unsafe destBuilder.pushHeader(KeyPathBuffer.Header(
+          size: componentSize,
+          trivial: rootBuffer.trivial && leafBuffer.trivial,
+          hasReferencePrefix: false,
+          isSingleComponent: false
+        ))
+
+        let rootMaxSize = unsafe rootBuffer.maxSize
+
+        // Clone the root components into the buffer.
+        while true {
+          let (component, type) = unsafe rootBuffer.next()
+
+          unsafe component.clone(
+            into: &destBuilder.buffer,
+            endOfReferencePrefix: component.header.endOfReferencePrefix,
+
+            // Root components don't need to adjust for alignment because the
+            // components should appear at the same offset as the root keypath.
+            adjustForAlignment: false
+          )
+
+          if let type = type {
+            unsafe destBuilder.push(type)
+          } else {
+            // The root's final case component produces `Optional<Mid>`.
+            unsafe destBuilder.push(Optional<Mid>.self as Any.Type)
+            break
+          }
+        }
+
+        // Insert the optional-chain component at the joint.
+        unsafe destBuilder.push(RawKeyPathComponent.Header(optionalChain: ()))
+        unsafe destBuilder.push(Mid.self as Any.Type)
+
+        let leafMaxSize = unsafe leafBuffer.maxSize
+
+        // Clone the leaf components into the buffer.
+        while true {
+          let (component, type) = unsafe leafBuffer.next()
+
+          unsafe component.clone(
+            into: &destBuilder.buffer,
+            endOfReferencePrefix: component.header.endOfReferencePrefix,
+
+            // Appending can change a leaf component's alignment, so
+            // recompute the padding of captured arguments.
+            adjustForAlignment: true
+          )
+
+          if let type = type {
+            unsafe destBuilder.push(type)
+          } else {
+            break
+          }
+        }
+
+        // Append our max size at the end of the buffer. The operands' max
+        // sizes cover all of the composed path's intermediate types.
+        unsafe destBuilder.push(Swift.max(rootMaxSize, leafMaxSize))
+
+        unsafe _internalInvariant(destBuilder.buffer.isEmpty,
+                     "did not fill entire result buffer")
+      }
+    }
+  }
 }
 
 // The distance in bytes from the address point of a KeyPath object to its
@@ -3668,6 +3967,7 @@ internal protocol KeyPathPatternVisitor {
                                        idValue: Int32,
                                        getter: UnsafeRawPointer,
                                        setter: UnsafeRawPointer?,
+                                       enumCaseEmbed: UnsafeRawPointer?,
                                        arguments: KeyPathPatternComputedArguments?,
                                        externalArgs: UnsafeBufferPointer<Int32>?)
   mutating func visitOptionalChainComponent()
@@ -3767,7 +4067,8 @@ internal func _walkKeyPathPattern<W: KeyPathPatternVisitor>(
       -> (idValueBase: UnsafeRawPointer,
           idValue: Int32,
           getter: UnsafeRawPointer,
-          setter: UnsafeRawPointer?) {
+          setter: UnsafeRawPointer?,
+          enumCaseEmbed: UnsafeRawPointer?) {
     let idValueBase = unsafe componentBuffer.baseAddress._unsafelyUnwrappedUnchecked
     let idValue = unsafe _pop(from: &componentBuffer, as: Int32.self)
     let getterBase = unsafe componentBuffer.baseAddress._unsafelyUnwrappedUnchecked
@@ -3781,8 +4082,17 @@ internal func _walkKeyPathPattern<W: KeyPathPatternVisitor>(
     } else {
       unsafe setter = nil
     }
+    // An enum case component's embed function follows the getter.
+    let enumCaseEmbed: UnsafeRawPointer?
+    if header.isComputedEnumCase {
+      let embedBase = unsafe componentBuffer.baseAddress._unsafelyUnwrappedUnchecked
+      let embedRef = unsafe _pop(from: &componentBuffer, as: Int32.self)
+      unsafe enumCaseEmbed = unsafe _resolveCompactFunctionPointer(embedBase, embedRef)
+    } else {
+      unsafe enumCaseEmbed = nil
+    }
     return unsafe (idValueBase: idValueBase, idValue: idValue,
-            getter: getter, setter: setter)
+            getter: getter, setter: setter, enumCaseEmbed: enumCaseEmbed)
   }
 
   func popComputedArguments(header: RawKeyPathComponent.Header,
@@ -3852,7 +4162,7 @@ internal func _walkKeyPathPattern<W: KeyPathPatternVisitor>(
     case .class, .struct:
       unsafe visitStored(header: header, componentBuffer: &buffer)
     case .computed:
-      let (idValueBase, idValue, getter, setter)
+      let (idValueBase, idValue, getter, setter, enumCaseEmbed)
         = unsafe popComputedAccessors(header: header,
                                componentBuffer: &buffer)
 
@@ -3867,6 +4177,7 @@ internal func _walkKeyPathPattern<W: KeyPathPatternVisitor>(
                                     idValue: idValue,
                                     getter: getter,
                                     setter: setter,
+                                    enumCaseEmbed: enumCaseEmbed,
                                     arguments: arguments,
                                     externalArgs: nil)
 
@@ -3931,7 +4242,8 @@ internal func _walkKeyPathPattern<W: KeyPathPatternVisitor>(
         
       case .computed:
         // A computed component. The accessors come from the descriptor.
-        let (idValueBase, idValue, getter, setter)
+        // Property descriptors never describe enum case components.
+        let (idValueBase, idValue, getter, setter, _)
           = unsafe popComputedAccessors(header: descriptorHeader,
                                  componentBuffer: &descriptorBuffer)
         
@@ -3965,6 +4277,7 @@ internal func _walkKeyPathPattern<W: KeyPathPatternVisitor>(
           idValue: idValue,
           getter: getter,
           setter: setter,
+          enumCaseEmbed: nil,
           arguments: arguments,
           externalArgs: genericParamCount > 0 ? externalArgs : nil)
       case .optionalChain, .optionalWrap, .optionalForce, .external:
@@ -4016,6 +4329,16 @@ internal struct GetKeyPathClassAndInstanceSizeFromPattern
 
   var capability: KeyPathKind = .value
   var didChain: Bool = false
+  // A pattern of enum case components, alternating with the optional chains
+  // that project their payloads, instantiates a CaseKeyPath.
+  enum CaseShape {
+    case start, afterCase, afterChain, broken
+  }
+  var caseShape: CaseShape = .start
+  var isCaseKeyPathPattern: Bool {
+    if case .afterCase = unsafe caseShape { return true }
+    return false
+  }
   var root: Any.Type!
   var leaf: Any.Type!
   var genericEnvironment: UnsafeRawPointer?
@@ -4051,6 +4374,8 @@ internal struct GetKeyPathClassAndInstanceSizeFromPattern
   mutating func visitStoredComponent(kind: KeyPathStructOrClass,
                                      mutable: Bool,
                                      offset: KeyPathPatternStoredOffset) {
+    unsafe caseShape = .broken
+
     // Mutable class properties can be the root of a reference mutation.
     // Mutable struct properties pass through the existing capability.
     if mutable {
@@ -4083,8 +4408,16 @@ internal struct GetKeyPathClassAndInstanceSizeFromPattern
                                    idValue: Int32,
                                    getter: UnsafeRawPointer,
                                    setter: UnsafeRawPointer?,
+                                   enumCaseEmbed: UnsafeRawPointer?,
                                    arguments: KeyPathPatternComputedArguments?,
                                    externalArgs: UnsafeBufferPointer<Int32>?) {
+    switch unsafe (caseShape, enumCaseEmbed) {
+    case (.start, .some), (.afterChain, .some):
+      unsafe caseShape = .afterCase
+    default:
+      unsafe caseShape = .broken
+    }
+
     let settable = unsafe setter != nil
 
     switch (settable, mutating) {
@@ -4107,6 +4440,10 @@ internal struct GetKeyPathClassAndInstanceSizeFromPattern
     // ...id, getter, and maybe setter...
     unsafe size += MemoryLayout<Int>.size * 2
     if settable {
+      unsafe size += MemoryLayout<Int>.size
+    }
+    // ...and maybe an enum case component's embed function.
+    if unsafe enumCaseEmbed != nil {
       unsafe size += MemoryLayout<Int>.size
     }
 
@@ -4159,6 +4496,11 @@ internal struct GetKeyPathClassAndInstanceSizeFromPattern
   mutating func visitOptionalChainComponent() {
     // Optional chaining forces the entire keypath to be read-only, even if
     // there are further reference-writable components.
+    if case .afterCase = unsafe caseShape {
+      unsafe caseShape = .afterChain
+    } else {
+      unsafe caseShape = .broken
+    }
     unsafe didChain = true
     unsafe capability = .readOnly
     unsafe size += 4
@@ -4166,6 +4508,7 @@ internal struct GetKeyPathClassAndInstanceSizeFromPattern
   mutating func visitOptionalWrapComponent() {
     // Optional chaining forces the entire keypath to be read-only, even if
     // there are further reference-writable components.
+    unsafe caseShape = .broken
     unsafe didChain = true
     unsafe capability = .readOnly
     unsafe size += 4
@@ -4173,6 +4516,7 @@ internal struct GetKeyPathClassAndInstanceSizeFromPattern
 
   mutating func visitOptionalForceComponent() {
     // Force-unwrapping passes through the mutability of the preceding keypath.
+    unsafe caseShape = .broken
     unsafe size += 4
   }
 
@@ -4188,6 +4532,17 @@ internal struct GetKeyPathClassAndInstanceSizeFromPattern
     unsafe sizeWithMaxSize = unsafe MemoryLayout<Int>._roundingUpToAlignment(size)
     unsafe sizeWithMaxSize &+= MemoryLayout<Int>.size
   }
+}
+
+// Unwraps one level of Optional from a leaf type to form a CaseKeyPath class.
+@_unavailableInEmbedded
+internal protocol _OptionalWrappedTypeProviding {
+  static var _wrappedType: Any.Type { get }
+}
+
+@_unavailableInEmbedded
+extension Optional: _OptionalWrappedTypeProviding {
+  internal static var _wrappedType: Any.Type { return Wrapped.self }
 }
 
 @_unavailableInEmbedded
@@ -4211,6 +4566,18 @@ internal func _getKeyPathClassAndInstanceSizeFromPattern(
   // Grab the class object for the key path type we'll end up with.
   func openRoot<Root>(_: Root.Type) -> AnyKeyPath.Type {
     func openLeaf<Leaf>(_: Leaf.Type) -> AnyKeyPath.Type {
+      // Enum case components instantiate a CaseKeyPath whose Value is the
+      // leaf type with one level of Optional unwrapped.
+      if unsafe walker.isCaseKeyPathPattern,
+         #available(SwiftStdlib 6.5, *),
+         let payload =
+           (Leaf.self as? any _OptionalWrappedTypeProviding.Type)?
+             ._wrappedType {
+        func openPayload<Payload>(_: Payload.Type) -> AnyKeyPath.Type {
+          return CaseKeyPath<Root, Payload>.self
+        }
+        return _openExistential(payload, do: openPayload)
+      }
       switch unsafe walker.capability {
       case .readOnly:
         return KeyPath<Root, Leaf>.self
@@ -4401,6 +4768,7 @@ internal struct InstantiateKeyPathBuffer: KeyPathPatternVisitor {
                                    idValue: Int32,
                                    getter: UnsafeRawPointer,
                                    setter: UnsafeRawPointer?,
+                                   enumCaseEmbed: UnsafeRawPointer?,
                                    arguments: KeyPathPatternComputedArguments?,
                                    externalArgs: UnsafeBufferPointer<Int32>?) {
     unsafe isPureStruct.append(false)
@@ -4458,12 +4826,15 @@ internal struct InstantiateKeyPathBuffer: KeyPathPatternVisitor {
     }
 
     // Bring over the header, getter, and setter.
-    let header = unsafe RawKeyPathComponent.Header(computedWithIDKind: idKind,
+    var header = unsafe RawKeyPathComponent.Header(computedWithIDKind: idKind,
           mutating: mutating,
           settable: settable,
           hasArguments: arguments != nil || externalArgs != nil,
           instantiatedFromExternalWithArguments:
             arguments != nil && externalArgs != nil)
+    if unsafe enumCaseEmbed != nil {
+      header._value |= RawKeyPathComponent.Header.computedEnumCaseFlag
+    }
     unsafe pushDest(header)
     unsafe pushDest(resolvedID)
     unsafe pushAddressDiscriminatedFunctionPointer(getter,
@@ -4472,6 +4843,11 @@ internal struct InstantiateKeyPathBuffer: KeyPathPatternVisitor {
       unsafe pushAddressDiscriminatedFunctionPointer(setter,
         discriminator: mutating ? ComputedAccessorsPtr.mutatingSetterPtrAuthKey
                              : ComputedAccessorsPtr.nonmutatingSetterPtrAuthKey)
+    }
+    if let enumCaseEmbed = unsafe enumCaseEmbed {
+      // The embed function is signed like the getter.
+      unsafe pushAddressDiscriminatedFunctionPointer(enumCaseEmbed,
+                           discriminator: ComputedAccessorsPtr.getterPtrAuthKey)
     }
 
     if let arguments = unsafe arguments {
@@ -4671,6 +5047,7 @@ internal struct ValidatingInstantiateKeyPathBuffer: KeyPathPatternVisitor {
                                    idValue: Int32,
                                    getter: UnsafeRawPointer,
                                    setter: UnsafeRawPointer?,
+                                   enumCaseEmbed: UnsafeRawPointer?,
                                    arguments: KeyPathPatternComputedArguments?,
                                    externalArgs: UnsafeBufferPointer<Int32>?) {
     unsafe sizeVisitor.visitComputedComponent(mutating: mutating,
@@ -4680,6 +5057,7 @@ internal struct ValidatingInstantiateKeyPathBuffer: KeyPathPatternVisitor {
                                        idValue: idValue,
                                        getter: getter,
                                        setter: setter,
+                                       enumCaseEmbed: enumCaseEmbed,
                                        arguments: arguments,
                                        externalArgs: externalArgs)
     unsafe instantiateVisitor.visitComputedComponent(mutating: mutating,
@@ -4689,6 +5067,7 @@ internal struct ValidatingInstantiateKeyPathBuffer: KeyPathPatternVisitor {
                                        idValue: idValue,
                                        getter: getter,
                                        setter: setter,
+                                       enumCaseEmbed: enumCaseEmbed,
                                        arguments: arguments,
                                        externalArgs: externalArgs)
     // Note: For this function and the ones below, modification of structOffset
@@ -4996,6 +5375,19 @@ fileprivate func dynamicLibraryAddress<Base, Leaf>(
   return unsafe "<computed \(pointer) (\(leaf))>"
 }
 
+fileprivate func enumCaseName(
+  of type: Any.Type, id: ComputedPropertyID
+) -> String? {
+  // The id is the case's tag, which indexes the reflection metadata.
+  var field = unsafe _FieldReflectionMetadata()
+  _ = unsafe _getChildMetadata(type, index: id.value, fieldMetadata: &field)
+  defer {
+    unsafe field.freeFunc?(field.name)
+  }
+  guard unsafe field.name != nil else { return nil }
+  return unsafe String(cString: field.name)
+}
+
 #endif
 
 @available(SwiftStdlib 5.8, *)
@@ -5047,9 +5439,14 @@ extension AnyKeyPath: CustomDebugStringConvertible {
           } else {
             description.append("<offset \(offset) (\(nextType))>")
           }
-        case .get(_, let accessors, _),
-            .nonmutatingGetSet(_, let accessors, _),
-            .mutatingGetSet(_, let accessors, _):
+        case .get(let id, let accessors, _),
+            .nonmutatingGetSet(let id, let accessors, _),
+            .mutatingGetSet(let id, let accessors, _):
+          if rawComponent.header.isComputedEnumCase,
+             let caseName = enumCaseName(of: valueType, id: id) {
+            description.append(caseName)
+            break
+          }
           func project<Base>(base: Base.Type) -> String {
             func project2<Leaf>(leaf: Leaf.Type) -> String {
               dynamicLibraryAddress(

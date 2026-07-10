@@ -370,6 +370,137 @@ bool swift::tryOptimizeKeypathApplication(ApplyInst *AI,
   return true;
 }
 
+/// Try to optimize an application of a case key path's `callAsFunction`.
+///
+/// Replaces (simplified SIL):
+///   %kp = keypath $CaseKeyPath<Root, Payload>, ...
+///   apply %callAsFunction(%payload, %kp)
+/// with direct applications of the pattern's embed functions, innermost
+/// case first.
+bool swift::tryOptimizeKeypathCaseEmbed(ApplyInst *AI, SILFunction *callee,
+                                        SILBuilder Builder) {
+  if (!callee->hasSemanticsAttr(semantics::KEYPATH_CASE_EMBED))
+    return false;
+
+  auto args = AI->getArgumentsWithoutIndirectResults();
+  if (args.size() < 1 || args.size() > 2)
+    return false;
+
+  KeyPathInst *kp = KeyPathProjector::getLiteralKeyPath(args.back());
+  if (!kp || !kp->hasPattern() || !kp->getAllOperands().empty())
+    return false;
+
+  SmallVector<const KeyPathPatternComponent *, 4> cases;
+  for (auto &comp : kp->getPattern()->getComponents()) {
+    switch (comp.getKind()) {
+    case KeyPathPatternComponent::Kind::EnumCase:
+      cases.push_back(&comp);
+      break;
+    case KeyPathPatternComponent::Kind::OptionalChain:
+      break;
+    default:
+      return false;
+    }
+  }
+  if (cases.empty())
+    return false;
+
+  SILFunction *F = AI->getFunction();
+  auto &M = F->getModule();
+  auto typeCtx = F->getTypeExpansionContext();
+  auto subs = kp->getSubstitutions();
+  SILLocation loc = AI->getLoc();
+
+  // Verify the chain's types before emitting anything: each embed takes
+  // the previous embed's result, the innermost takes the payload, and the
+  // outermost produces the apply's result.
+  SmallVector<std::pair<SILType, SILType>, 4> stages;
+  for (const auto *c : llvm::reverse(cases)) {
+    auto *embed = c->getEnumCaseEmbedFunction();
+    auto embedTy =
+        embed->getLoweredFunctionType()->substGenericArgs(M, subs, typeCtx);
+    SILFunctionConventions conv(embedTy, M);
+    if (conv.getNumIndirectSILResults() != 1 || conv.getNumParameters() != 1)
+      return false;
+    SILType outTy = conv.getSILArgumentType(0, typeCtx);
+    SILType inTy = conv.getSILArgumentType(1, typeCtx);
+    if (!stages.empty() && stages.back().second != inTy)
+      return false;
+    stages.emplace_back(inTy, outTy);
+  }
+
+  SILType payloadTy = stages.front().first;
+  SILType resultTy = stages.back().second;
+  auto calleeConv = AI->getSubstCalleeConv();
+  bool indirectResult = calleeConv.getNumIndirectSILResults() == 1;
+  if (indirectResult) {
+    if (AI->getArgument(0)->getType() != resultTy.getAddressType())
+      return false;
+  } else {
+    if (AI->getType() != resultTy.getObjectType())
+      return false;
+  }
+  SILValue payload = args.size() == 2 ? args[0] : SILValue();
+  bool payloadConsumed =
+      payload && calleeConv.getParameters()[0].isConsumedInCallee();
+  if (payload && payload->getType().isAddress() &&
+      payload->getType() != payloadTy.getAddressType())
+    return false;
+  if (payload && payload->getType().isObject() &&
+      payload->getType() != payloadTy.getObjectType())
+    return false;
+  if (!payload && !payloadTy.getASTType()->isVoid())
+    return false;
+
+  // Materialize the innermost payload.
+  SmallVector<SILValue, 4> allocs;
+  SILValue current;
+  bool ownsCurrent;
+  if (payload && payload->getType().isAddress()) {
+    current = payload;
+    ownsCurrent = payloadConsumed;
+  } else {
+    current = Builder.createAllocStack(loc, payloadTy.getObjectType());
+    allocs.push_back(current);
+    SILValue value = payload;
+    if (!value)
+      value = Builder.createTuple(loc, payloadTy.getObjectType(), {});
+    else if (!payloadConsumed)
+      value = Builder.emitCopyValueOperation(loc, value);
+    Builder.emitStoreValueOperation(loc, value, current,
+                                    StoreOwnershipQualifier::Init);
+    ownsCurrent = true;
+  }
+
+  for (unsigned i = 0, e = stages.size(); i < e; ++i) {
+    const auto *c = cases[cases.size() - 1 - i];
+    SILValue out;
+    if (i + 1 == stages.size() && indirectResult) {
+      out = AI->getArgument(0);
+    } else {
+      out = Builder.createAllocStack(loc, stages[i].second.getObjectType());
+      allocs.push_back(out);
+    }
+    auto ref = Builder.createFunctionRef(loc, c->getEnumCaseEmbedFunction());
+    Builder.createApply(loc, ref, subs, {out, current});
+    if (ownsCurrent)
+      Builder.createDestroyAddr(loc, current);
+    current = out;
+    ownsCurrent = true;
+  }
+
+  if (!indirectResult) {
+    SILValue result = Builder.emitLoadValueOperation(
+        loc, current, LoadOwnershipQualifier::Take);
+    AI->replaceAllUsesWith(result);
+  }
+  for (SILValue alloc : llvm::reverse(allocs))
+    Builder.createDeallocStack(loc, alloc);
+
+  ++NumOptimizedKeypaths;
+  return true;
+}
+
 /// Replaces a call of the getter of AnyKeyPath._storedInlineOffset with a
 /// "constant" offset, in case of a keypath literal.
 ///
@@ -442,6 +573,7 @@ bool swift::tryOptimizeKeypathOffsetOf(ApplyInst *AI,
         return false;
       hasOffset = false;
       break;
+    case KeyPathPatternComponent::Kind::EnumCase:
     case KeyPathPatternComponent::Kind::OptionalChain:
     case KeyPathPatternComponent::Kind::OptionalForce:
     case KeyPathPatternComponent::Kind::OptionalWrap:
@@ -567,7 +699,9 @@ bool swift::tryOptimizeKeypathKVCString(ApplyInst *AI,
 
 bool swift::tryOptimizeKeypath(ApplyInst *AI, SILBuilder Builder) {
   if (SILFunction *callee = AI->getReferencedFunctionOrNull()) {
-    return tryOptimizeKeypathApplication(AI, callee, Builder);
+    if (tryOptimizeKeypathApplication(AI, callee, Builder))
+      return true;
+    return tryOptimizeKeypathCaseEmbed(AI, callee, Builder);
   }
   
   // Try optimize keypath method calls.

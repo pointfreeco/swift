@@ -578,7 +578,31 @@ Type CompletionLookup::getTypeOfMember(const ValueDecl *VD,
 
       // The result type of the VD.
       // i.e. 'Circle.center' => 'Point'.
-      auto innerResultTy = getTypeOfMember(VD, keyPathRootTy);
+      Type innerResultTy;
+      if (auto *element = dyn_cast<EnumElementDecl>(VD)) {
+        auto &ctx = element->getASTContext();
+        Type payloadTy = TupleType::getEmpty(ctx);
+        if (auto *params = element->getParameterList()) {
+          if (params->size() == 1) {
+            payloadTy = params->get(0)->getInterfaceType();
+          } else {
+            SmallVector<TupleTypeElt, 4> elts;
+            for (auto *param : *params)
+              elts.emplace_back(param->getInterfaceType(),
+                                param->getArgumentName());
+            payloadTy = TupleType::get(elts, ctx);
+          }
+          payloadTy = payloadTy.subst(keyPathRootTy->getContextSubstitutionMap(
+              element->getParentEnum()));
+        }
+        auto *keyPathType = SD->getDynamicMemberLookupKeyPathType();
+        bool isCaseKeyPath = keyPathType && keyPathType->getDecl() ==
+                                                ctx.getCaseKeyPathDecl();
+        innerResultTy =
+            isCaseKeyPath ? payloadTy : Type(OptionalType::get(payloadTy));
+      } else {
+        innerResultTy = getTypeOfMember(VD, keyPathRootTy);
+      }
 
       if (auto paramTy = keyPathResultTy->getAs<GenericTypeParamType>()) {
         // Replace keyPath result type in the map with the inner result type.

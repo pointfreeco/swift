@@ -3203,6 +3203,7 @@ bool KeyPathPatternComponent::isComputedSettablePropertyMutating() const {
   case Kind::StoredProperty:
   case Kind::GettableProperty:
   case Kind::Method:
+  case Kind::EnumCase:
   case Kind::OptionalChain:
   case Kind::OptionalWrap:
   case Kind::OptionalForce:
@@ -3227,6 +3228,14 @@ forEachRefcountableReference(const KeyPathPatternComponent &component,
   case KeyPathPatternComponent::Kind::OptionalForce:
   case KeyPathPatternComponent::Kind::TupleElement:
     return;
+  case KeyPathPatternComponent::Kind::EnumCase: {
+    forFunction(component.getEnumCaseExtractFunction());
+    forFunction(component.getEnumCaseEmbedFunction());
+    auto id = component.getComputedPropertyId();
+    if (id.getKind() == KeyPathPatternComponent::ComputedPropertyId::Function)
+      forFunction(id.getFunction());
+    return;
+  }
   case KeyPathPatternComponent::Kind::SettableProperty:
     forFunction(component.getComputedPropertyForSettable());
     LLVM_FALLTHROUGH;
@@ -3284,6 +3293,7 @@ KeyPathPattern::get(SILModule &M, CanGenericSignature signature,
     case KeyPathPatternComponent::Kind::OptionalWrap:
     case KeyPathPatternComponent::Kind::OptionalForce:
     case KeyPathPatternComponent::Kind::TupleElement:
+    case KeyPathPatternComponent::Kind::EnumCase:
       break;
 
     case KeyPathPatternComponent::Kind::Method:
@@ -3371,9 +3381,18 @@ void KeyPathPattern::Profile(llvm::FoldingSetNodeID &ID,
 
     case KeyPathPatternComponent::Kind::Method:
     case KeyPathPatternComponent::Kind::SettableProperty:
-      ID.AddPointer(component.getComputedPropertyForSettable());
-      LLVM_FALLTHROUGH;
+    case KeyPathPatternComponent::Kind::EnumCase:
     case KeyPathPatternComponent::Kind::GettableProperty:
+      switch (component.getKind()) {
+      case KeyPathPatternComponent::Kind::SettableProperty:
+        ID.AddPointer(component.getComputedPropertyForSettable());
+        break;
+      case KeyPathPatternComponent::Kind::EnumCase:
+        ID.AddPointer(component.getEnumCaseEmbedFunction());
+        break;
+      default:
+        break;
+      }
       ID.AddPointer(component.getComputedPropertyForGettable());
       auto id = component.getComputedPropertyId();
       ID.AddInteger(id.getKind());
@@ -3558,6 +3577,14 @@ SILType KeyPathInst::getStaticInstanceClassType() const {
       }
       break;
     }
+    case KeyPathPatternComponent::Kind::EnumCase:
+      if (keyPathTy->getDecl() != ctx.getCaseKeyPathDecl())
+        return SILType();
+      if (comp.getEnumCaseExtractFunction()->isGeneric() ||
+          comp.getEnumCaseEmbedFunction()->isGeneric())
+        return SILType();
+      return SILType::getPrimitiveObjectType(
+          keyPathTy->getCanonicalType());
     case KeyPathPatternComponent::Kind::OptionalChain:
     case KeyPathPatternComponent::Kind::OptionalForce:
     case KeyPathPatternComponent::Kind::OptionalWrap:
@@ -3635,6 +3662,13 @@ visitReferencedFunctionsAndMethods(
       std::function<void (SILFunction *)> functionCallBack,
       std::function<void (SILDeclRef)> methodCallBack) const {
   switch (getKind()) {
+  case KeyPathPatternComponent::Kind::EnumCase:
+    functionCallBack(getEnumCaseEmbedFunction());
+    functionCallBack(getEnumCaseExtractFunction());
+    if (getComputedPropertyId().getKind() ==
+        KeyPathPatternComponent::ComputedPropertyId::Function)
+      functionCallBack(getComputedPropertyId().getFunction());
+    break;
   case KeyPathPatternComponent::Kind::SettableProperty:
     functionCallBack(getComputedPropertyForSettable());
     LLVM_FALLTHROUGH;

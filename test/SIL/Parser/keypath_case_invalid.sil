@@ -1,0 +1,119 @@
+// RUN: %empty-directory(%t)
+// RUN: split-file %s %t
+// RUN: not %target-sil-opt -enable-experimental-feature CaseKeyPaths %t/function_id.sil 2>&1 | %FileCheck %t/function_id.sil
+// RUN: not %target-sil-opt -enable-experimental-feature CaseKeyPaths %t/non_element_id.sil 2>&1 | %FileCheck %t/non_element_id.sil
+// RUN: not %target-sil-opt -enable-experimental-feature CaseKeyPaths %t/missing_id.sil 2>&1 | %FileCheck %t/missing_id.sil
+// RUN: not %target-sil-opt -enable-experimental-feature CaseKeyPaths %t/missing_extract.sil 2>&1 | %FileCheck %t/missing_extract.sil
+// RUN: not %target-sil-opt -enable-experimental-feature CaseKeyPaths %t/missing_embed.sil 2>&1 | %FileCheck %t/missing_embed.sil
+// REQUIRES: swift_feature_CaseKeyPaths
+
+//--- function_id.sil
+
+// Enum case components are identified by the enum element, not a function.
+
+sil_stage canonical
+
+import Swift
+
+enum E {
+  case one(Int)
+  case two
+}
+
+sil @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>
+sil @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E
+
+// CHECK: keypath enum_case component needs an enum element id, extract, and embed
+sil @bad_id : $@convention(thin) () -> @owned CaseKeyPath<E, Int> {
+bb0:
+  %0 = keypath $CaseKeyPath<E, Int>, (root $E; enum_case $Optional<Int>, id @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>, extract @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>, embed @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E)
+  return %0
+}
+
+//--- non_element_id.sil
+
+// A decl-ref id must reference an enum element.
+
+sil_stage canonical
+
+import Swift
+
+enum E {
+  case one(Int)
+  case two
+}
+
+struct S {
+  func method() -> Int
+}
+
+sil @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>
+sil @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E
+
+// CHECK: keypath enum_case component needs an enum element id, extract, and embed
+sil @bad_id : $@convention(thin) () -> @owned CaseKeyPath<E, Int> {
+bb0:
+  %0 = keypath $CaseKeyPath<E, Int>, (root $E; enum_case $Optional<Int>, id #S.method : (S) -> () -> Int, extract @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>, embed @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E)
+  return %0
+}
+
+//--- missing_id.sil
+
+sil_stage canonical
+
+import Swift
+
+enum E {
+  case one(Int)
+  case two
+}
+
+sil @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>
+sil @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E
+
+// CHECK: keypath enum_case component needs an enum element id, extract, and embed
+sil @bad_id : $@convention(thin) () -> @owned CaseKeyPath<E, Int> {
+bb0:
+  %0 = keypath $CaseKeyPath<E, Int>, (root $E; enum_case $Optional<Int>, extract @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>, embed @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E)
+  return %0
+}
+
+//--- missing_extract.sil
+
+sil_stage canonical
+
+import Swift
+
+enum E {
+  case one(Int)
+  case two
+}
+
+sil @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E
+
+// CHECK: keypath enum_case component needs an enum element id, extract, and embed
+sil @bad_id : $@convention(thin) () -> @owned CaseKeyPath<E, Int> {
+bb0:
+  %0 = keypath $CaseKeyPath<E, Int>, (root $E; enum_case $Optional<Int>, id #E.one!enumelt : (E.Type) -> (Int) -> E, embed @embed : $@convention(keypath_accessor_getter) (@in_guaranteed Int) -> @out E)
+  return %0
+}
+
+//--- missing_embed.sil
+
+sil_stage canonical
+
+import Swift
+
+enum E {
+  case one(Int)
+  case two
+}
+
+sil @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>
+
+// CHECK: keypath enum_case component needs an enum element id, extract, and embed
+sil @bad_id : $@convention(thin) () -> @owned CaseKeyPath<E, Int> {
+bb0:
+  %0 = keypath $CaseKeyPath<E, Int>, (root $E; enum_case $Optional<Int>, id #E.one!enumelt : (E.Type) -> (Int) -> E, extract @extract : $@convention(keypath_accessor_getter) (@in_guaranteed E) -> @out Optional<Int>)
+  return %0
+}

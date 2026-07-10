@@ -1061,6 +1061,37 @@ bool GenericArgumentsMismatchFailure::diagnoseAsError() {
       break;
     }
 
+    case ConstraintLocator::KeyPathValue: {
+      auto purpose = getContextualTypePurpose();
+      auto contextualTy = getContextualType(anchor);
+      if (!isExpr<KeyPathExpr>(anchor) || purpose == CTP_Unused ||
+          !contextualTy)
+        return false;
+      auto *contextualBGT = contextualTy->getAs<BoundGenericType>();
+      if (!contextualBGT || !contextualBGT->isCaseKeyPath())
+        return false;
+      // The components project `Optional` of the case key path's `Value`.
+      auto fromValueTy = fromType->getOptionalObjectType();
+      if (!fromValueTy)
+        return false;
+      diagnostic = getDiagnosticFor(purpose);
+      if (!diagnostic)
+        return false;
+      emitDiagnosticAt(
+          ::getLoc(anchor), *diagnostic,
+          BoundGenericType::get(
+              contextualBGT->getDecl(), /*parent=*/Type(),
+              {contextualBGT->getGenericArgs()[0], fromValueTy}),
+          contextualTy);
+      auto *param =
+          contextualBGT->getDecl()->getGenericParams()->getParams()[1];
+      auto noteLoc = param->getLoc();
+      emitDiagnosticAt(noteLoc.isValid() ? noteLoc : ::getLoc(anchor),
+                       diag::generic_argument_mismatch, param->getName(),
+                       fromValueTy, contextualBGT->getGenericArgs()[1]);
+      return true;
+    }
+
     case ConstraintLocator::CoercionOperand: {
       diagnostic = getDiagnosticFor(CTP_CoerceOperand);
       break;
@@ -6689,6 +6720,36 @@ bool UnsupportedStaticMemberRefInKeyPath::diagnoseAsError() {
 bool InvalidEnumCaseRefInKeyPath::diagnoseAsError() {
   emitDiagnostic(diag::expr_keypath_enum_case, getMember(),
                  isForKeyPathDynamicMemberLookup());
+  return true;
+}
+
+bool InvalidNonEnumCaseRefInCaseKeyPath::diagnoseAsError() {
+  emitDiagnostic(diag::expr_case_keypath_not_enum_case, getMember());
+  return true;
+}
+
+bool InvalidEnumCaseOnMetatypeInKeyPath::diagnoseAsError() {
+  emitDiagnostic(diag::expr_case_keypath_metatype_root, getMember(),
+                 getBaseType());
+  return true;
+}
+
+bool InvalidEnumCaseApplicationInKeyPath::diagnoseAsError() {
+  auto diagnostic =
+      emitDiagnostic(diag::expr_case_keypath_arguments, getMember());
+
+  // Suggest removing the argument list that follows the case component.
+  if (auto *keyPath = getAsExpr<KeyPathExpr>(getRawAnchor())) {
+    if (auto component =
+            getLocator()->findLast<LocatorPathElt::KeyPathComponent>()) {
+      auto components = keyPath->getComponents();
+      auto next = component->getIndex() + 1;
+      if (next < components.size()) {
+        if (auto *args = components[next].getArgs())
+          diagnostic.fixItRemove(args->getSourceRange());
+      }
+    }
+  }
   return true;
 }
 

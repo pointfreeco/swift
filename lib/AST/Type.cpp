@@ -1370,11 +1370,12 @@ bool TypeBase::isUnicodeScalar() {
 
 bool TypeBase::isKnownKeyPathType() {
   return isKeyPath() || isWritableKeyPath() || isReferenceWritableKeyPath() ||
-         isPartialKeyPath() || isAnyKeyPath();
+         isPartialKeyPath() || isAnyKeyPath() || isCaseKeyPath();
 }
 
 bool TypeBase::isKnownImmutableKeyPathType() {
-  return isKeyPath() || isPartialKeyPath() || isAnyKeyPath();
+  return isKeyPath() || isPartialKeyPath() || isAnyKeyPath() ||
+         isCaseKeyPath();
 }
 
 bool TypeBase::isKnownStdlibCollectionType() {

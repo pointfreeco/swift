@@ -680,6 +680,15 @@ NOTE(keypath_static_member_access_from_unsupported_module_note,none,
 ERROR(expr_keypath_enum_case,none,
       "%select{key path|dynamic key path member lookup}1 cannot refer to enum case %0",
       (const ValueDecl *, bool))
+ERROR(expr_case_keypath_not_enum_case,none,
+      "case key path cannot refer to %kind0",
+      (const ValueDecl *))
+ERROR(expr_case_keypath_arguments,none,
+      "case key path cannot apply arguments to enum case %0",
+      (const ValueDecl *))
+ERROR(expr_case_keypath_metatype_root,none,
+      "key path cannot refer to enum case %0 on metatype %1",
+      (const ValueDecl *, Type))
 ERROR(expr_keypath_mutating_method,none,
       "%select{key path|dynamic key path member lookup}1 cannot refer to mutating method %0",
       (const ValueDecl *, bool))

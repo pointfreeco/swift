@@ -2391,6 +2391,41 @@ void ConstraintSystem::bindOverloadType(const SelectedOverload &overload,
   case OverloadChoiceKind::MaterializePack:
   case OverloadChoiceKind::ExtractFunctionIsolation:
   case OverloadChoiceKind::KeyPathApplication:
+    // An enum case key path component projects `Optional` of its
+    // associated values rather than binding to the constructor type.
+    if (auto *element =
+            dyn_cast_or_null<EnumElementDecl>(choice.getDeclOrNull())) {
+      if (ctx.LangOpts.hasFeature(Feature::CaseKeyPaths)) {
+        // A `CaseKeyPath` dynamic member binds the unwrapped payload; a
+        // plain `KeyPath` member binds the projected `Optional`.
+        if (locator->isForCaseKeyPathDynamicMemberLookup()) {
+          auto componentTy =
+              getEnumCaseKeyPathComponentType(ctx, openedType, element);
+          bindTypeOrIUO(componentTy->getOptionalObjectType());
+          return;
+        }
+        if (locator->isForKeyPathDynamicMemberLookup()) {
+          bindTypeOrIUO(
+              getEnumCaseKeyPathComponentType(ctx, openedType, element));
+          return;
+        }
+        if (locator->isForKeyPathComponent() &&
+            !locator->isForKeyPathDynamicMemberLookup()) {
+          // Applied references keep the constructor type so the invalid
+          // application is diagnosed on the component.
+          if (isAppliedKeyPathComponent(locator)) {
+            if (!openedType->is<AnyFunctionType>()) {
+              bindTypeOrIUO(FunctionType::get({}, openedType));
+              return;
+            }
+          } else {
+            bindTypeOrIUO(
+                getEnumCaseKeyPathComponentType(ctx, openedType, element));
+            return;
+          }
+        }
+      }
+    }
     bindTypeOrIUO(openedType);
     return;
   case OverloadChoiceKind::DeclViaDynamic: {

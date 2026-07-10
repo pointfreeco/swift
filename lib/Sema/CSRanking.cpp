@@ -1221,6 +1221,17 @@ SolutionCompareResult ConstraintSystem::compareSolutions(
       }
     }
 
+    // Rank a same-named member higher than an enum case.
+    if (isa<EnumElementDecl>(decl1) != isa<EnumElementDecl>(decl2) &&
+        (overload.locator->isForKeyPathComponent() ||
+         overload.locator->isForKeyPathDynamicMemberLookup())) {
+      if (isa<EnumElementDecl>(decl1))
+        score2 += weight;
+      else
+        score1 += weight;
+      continue;
+    }
+
     bool decl1InSubprotocol = false;
     bool decl2InSubprotocol = false;
     if (dc1->getContextKind() == DeclContextKind::GenericTypeDecl &&

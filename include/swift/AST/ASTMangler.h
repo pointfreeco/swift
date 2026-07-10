@@ -372,6 +372,12 @@ public:
                                              CanType baseType,
                                              SubstitutionMap subs,
                                              ResilienceExpansion expansion);
+  std::string mangleKeyPathCaseExtractThunkHelper(
+      const EnumElementDecl *element, GenericSignature signature,
+      CanType baseType, SubstitutionMap subs, ResilienceExpansion expansion);
+  std::string mangleKeyPathCaseEmbedThunkHelper(
+      const EnumElementDecl *element, GenericSignature signature,
+      CanType baseType, SubstitutionMap subs, ResilienceExpansion expansion);
   std::string mangleKeyPathUnappliedMethodThunkHelper(
       const AbstractFunctionDecl *method, GenericSignature signature,
       CanType baseType, SubstitutionMap subs, ResilienceExpansion expansion);

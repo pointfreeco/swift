@@ -2102,6 +2102,13 @@ class AllowInvalidRefInKeyPath final : public ConstraintFix {
     EnumCase,
     // Allow a reference to a type as a key path component.
     TypeReference,
+    // Allow a reference to a non-case member through a `CaseKeyPath`-based
+    // dynamic member lookup.
+    NonEnumCaseMember,
+    // Allow an enum case key path component with applied arguments.
+    AppliedEnumCase,
+    // Allow an enum case key path component on a metatype root.
+    EnumCaseOnMetatype,
   } Kind;
 
   ValueDecl *Member;
@@ -2132,6 +2139,13 @@ public:
       return "allow reference to an init method as a key path component";
     case RefKind::EnumCase:
       return "allow reference to an enum case as a key path component";
+    case RefKind::NonEnumCaseMember:
+      return "allow reference to a member other than an enum case through "
+             "a case key path dynamic member lookup";
+    case RefKind::AppliedEnumCase:
+      return "allow arguments applied to an enum case key path component";
+    case RefKind::EnumCaseOnMetatype:
+      return "allow an enum case key path component on a metatype root";
     case RefKind::MutatingMethod:
       return "allow reference to mutating method as a key path component";
     case RefKind::AsyncOrThrowsMethod:

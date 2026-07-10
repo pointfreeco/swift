@@ -1307,6 +1307,22 @@ bool AllowInvalidRefInKeyPath::diagnose(const Solution &solution,
     return failure.diagnose(asNote);
   }
 
+  case RefKind::NonEnumCaseMember: {
+    InvalidNonEnumCaseRefInCaseKeyPath failure(solution, Member, getLocator());
+    return failure.diagnose(asNote);
+  }
+
+  case RefKind::AppliedEnumCase: {
+    InvalidEnumCaseApplicationInKeyPath failure(solution, Member, getLocator());
+    return failure.diagnose(asNote);
+  }
+
+  case RefKind::EnumCaseOnMetatype: {
+    InvalidEnumCaseOnMetatypeInKeyPath failure(solution, BaseType, Member,
+                                               getLocator());
+    return failure.diagnose(asNote);
+  }
+
   case RefKind::MutatingGetter: {
     InvalidMemberWithMutatingGetterInKeyPath failure(solution, Member,
                                                      getLocator());
@@ -1361,6 +1377,17 @@ AllowInvalidRefInKeyPath *
 AllowInvalidRefInKeyPath::forRef(ConstraintSystem &cs, Type baseType,
                                  ValueDecl *member,
                                  ConstraintLocator *locator) {
+  bool isCaseKeyPathDynamicMember =
+      cs.getASTContext().LangOpts.hasFeature(Feature::CaseKeyPaths) &&
+      locator->isForCaseKeyPathDynamicMemberLookup();
+
+  // Only enum cases can be referenced through a dynamic member lookup
+  // whose subscript takes a `CaseKeyPath`.
+  if (isCaseKeyPathDynamicMember && !isa<EnumElementDecl>(member)) {
+    return AllowInvalidRefInKeyPath::create(
+        cs, baseType, RefKind::NonEnumCaseMember, member, locator);
+  }
+
   if (member->isStatic() && !isa<FuncDecl>(member)) {
     // References to static members are supported only for modules that
     // are built with 6.1+ compilers, libraries produced by earlier
@@ -1387,8 +1414,22 @@ AllowInvalidRefInKeyPath::forRef(ConstraintSystem &cs, Type baseType,
     }
   }
 
-  // Referencing enum cases in key path is not currently allowed.
+  // Referencing enum cases in key path requires the CaseKeyPaths feature.
   if (isa<EnumElementDecl>(member)) {
+    if (cs.getASTContext().LangOpts.hasFeature(Feature::CaseKeyPaths)) {
+      // A metatype root has no payload to extract.
+      if (baseType->getRValueType()->is<AnyMetatypeType>())
+        return AllowInvalidRefInKeyPath::create(
+            cs, baseType, RefKind::EnumCaseOnMetatype, member, locator);
+
+      // The case must be referenced unapplied: `\E.foo`, not `\E.foo(0)`.
+      if (isAppliedKeyPathComponent(locator))
+        return AllowInvalidRefInKeyPath::create(
+            cs, baseType, RefKind::AppliedEnumCase, member, locator);
+
+      return nullptr;
+    }
+
     return AllowInvalidRefInKeyPath::create(cs, baseType, RefKind::EnumCase,
                                             member, locator);
   }

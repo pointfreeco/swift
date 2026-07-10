@@ -1867,6 +1867,64 @@ public:
   bool diagnoseAsError() override;
 };
 
+/// Diagnose an attempt to reference a member other than an enum case
+/// through a dynamic member lookup whose subscript takes a `CaseKeyPath`:
+///
+/// ```swift
+/// struct S { var x: Int }
+/// _ = Cases<S>().x
+/// ```
+class InvalidNonEnumCaseRefInCaseKeyPath final
+    : public InvalidMemberRefInKeyPath {
+public:
+  InvalidNonEnumCaseRefInCaseKeyPath(const Solution &solution,
+                                     ValueDecl *member,
+                                     ConstraintLocator *locator)
+      : InvalidMemberRefInKeyPath(solution, member, locator) {}
+
+  bool diagnoseAsError() override;
+};
+
+/// Diagnose an attempt to apply arguments to an enum case referenced as a
+/// key path component:
+///
+/// ```swift
+/// enum E { case foo(Int) }
+/// _ = \E.foo(0)
+/// ```
+class InvalidEnumCaseApplicationInKeyPath final
+    : public InvalidMemberRefInKeyPath {
+public:
+  InvalidEnumCaseApplicationInKeyPath(const Solution &solution,
+                                      ValueDecl *member,
+                                      ConstraintLocator *locator)
+      : InvalidMemberRefInKeyPath(solution, member, locator) {}
+
+  bool diagnoseAsError() override;
+};
+
+/// Diagnose an attempt to reference an enum case through a metatype root:
+///
+/// ```swift
+/// enum E { case foo(Int) }
+/// _ = \E.Type.foo
+/// ```
+class InvalidEnumCaseOnMetatypeInKeyPath final
+    : public InvalidMemberRefInKeyPath {
+  Type BaseType;
+
+public:
+  InvalidEnumCaseOnMetatypeInKeyPath(const Solution &solution, Type baseType,
+                                     ValueDecl *member,
+                                     ConstraintLocator *locator)
+      : InvalidMemberRefInKeyPath(solution, member, locator),
+        BaseType(resolveType(baseType)->getRValueType()) {}
+
+  Type getBaseType() const { return BaseType; }
+
+  bool diagnoseAsError() override;
+};
+
 /// Diagnose an attempt to reference a method or initializer as a key path
 /// component.
 ///

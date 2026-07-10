@@ -4396,7 +4396,8 @@ enum KeyPathTypeKind : unsigned char {
   KPTK_PartialKeyPath,
   KPTK_KeyPath,
   KPTK_WritableKeyPath,
-  KPTK_ReferenceWritableKeyPath
+  KPTK_ReferenceWritableKeyPath,
+  KPTK_CaseKeyPath
 };
 
 /// NominalTypeDecl - a declaration of a nominal type, like a struct.

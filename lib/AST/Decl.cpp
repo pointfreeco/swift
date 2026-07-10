@@ -6304,6 +6304,7 @@ std::optional<KeyPathTypeKind> NominalTypeDecl::getKeyPathTypeKind() const {
   CASE(ReferenceWritableKeyPath)
   CASE(AnyKeyPath)
   CASE(PartialKeyPath)
+  CASE(CaseKeyPath)
 #undef CASE
   return std::nullopt;
 }
@@ -10232,7 +10233,8 @@ SubscriptDecl::getDynamicMemberParamTypeAsKeyPathType(Type paramTy) {
 
   if (!paramTy->isKeyPath() &&
       !paramTy->isWritableKeyPath() &&
-      !paramTy->isReferenceWritableKeyPath()) {
+      !paramTy->isReferenceWritableKeyPath() &&
+      !paramTy->isCaseKeyPath()) {
     return nullptr;
   }
 

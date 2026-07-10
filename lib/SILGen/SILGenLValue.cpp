@@ -2435,12 +2435,17 @@ emitUpcastToKeyPath(SILGenFunction &SGF, SILLocation loc,
                     KeyPathTypeKind typeKind, ManagedValue keyPath) {
   if (typeKind == KPTK_KeyPath) return keyPath;
   assert(typeKind == KPTK_WritableKeyPath ||
-         typeKind == KPTK_ReferenceWritableKeyPath);
+         typeKind == KPTK_ReferenceWritableKeyPath ||
+         typeKind == KPTK_CaseKeyPath);
 
   auto derivedKeyPathTy = keyPath.getType().castTo<BoundGenericType>();
+  SmallVector<Type, 2> baseArgs(derivedKeyPathTy->getGenericArgs().begin(),
+                                derivedKeyPathTy->getGenericArgs().end());
+  if (typeKind == KPTK_CaseKeyPath)
+    baseArgs[1] = OptionalType::get(baseArgs[1]);
   auto baseKeyPathTy =
     BoundGenericType::get(SGF.getASTContext().getKeyPathDecl(),
-                          Type(), derivedKeyPathTy->getGenericArgs())
+                          Type(), baseArgs)
       ->getCanonicalType();
   return SGF.B.createUpcast(loc, keyPath,
                             SILType::getPrimitiveObjectType(baseKeyPathTy));
@@ -2484,7 +2489,8 @@ namespace {
         replacementTypes.push_back(BaseFormalType);
       } else if (TypeKind == KPTK_KeyPath ||
                  TypeKind == KPTK_WritableKeyPath ||
-                 TypeKind == KPTK_ReferenceWritableKeyPath) {
+                 TypeKind == KPTK_ReferenceWritableKeyPath ||
+                 TypeKind == KPTK_CaseKeyPath) {
         projectFn = SGF.getASTContext().getGetAtKeyPath();
         sig = projectFn->getGenericSignature();
 
@@ -2493,7 +2499,12 @@ namespace {
         assert(keyPathTy->getGenericArgs()[0]->getCanonicalType() ==
                BaseFormalType->getCanonicalType());
         replacementTypes.push_back(keyPathTy->getGenericArgs()[0]);
-        replacementTypes.push_back(keyPathTy->getGenericArgs()[1]);
+        if (TypeKind == KPTK_CaseKeyPath) {
+          replacementTypes.push_back(
+              OptionalType::get(keyPathTy->getGenericArgs()[1]));
+        } else {
+          replacementTypes.push_back(keyPathTy->getGenericArgs()[1]);
+        }
 
         keyPathValue = emitUpcastToKeyPath(SGF, loc, TypeKind, keyPathValue);
       } else {
@@ -4639,11 +4650,12 @@ LValue SILGenLValue::visitKeyPathApplicationExpr(KeyPathApplicationExpr *e,
   bool useLogical = [&] {
     switch (accessKind) {
     // Use the physical 'read' pattern for these unless we're working with
-    // AnyKeyPath or PartialKeyPath, which only have getters.
+    // AnyKeyPath, PartialKeyPath, or CaseKeyPath, which only have getters.
     case SGFAccessKind::BorrowedAddressRead:
     case SGFAccessKind::BorrowedObjectRead:
       return (keyPathKind == KPTK_AnyKeyPath ||
-              keyPathKind == KPTK_PartialKeyPath);
+              keyPathKind == KPTK_PartialKeyPath ||
+              keyPathKind == KPTK_CaseKeyPath);
 
     case SGFAccessKind::OwnedObjectRead:
     case SGFAccessKind::OwnedAddressRead:

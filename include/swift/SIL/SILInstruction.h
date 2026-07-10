@@ -3797,6 +3797,7 @@ public:
     OptionalChain,
     OptionalForce,
     OptionalWrap,
+    EnumCase,
   };
 
   // Description of a captured index value and its Hashable conformance for a
@@ -3813,6 +3814,7 @@ private:
     PackedStored,
     PackedComputed,
     Unpacked,
+    PackedEnumCase,
   };
   
   static const unsigned KindPackingBits = 2;
@@ -3826,6 +3828,8 @@ private:
     case Kind::SettableProperty:
     case Kind::Method:
       return PackedComputed;
+    case Kind::EnumCase:
+      return PackedEnumCase;
     case Kind::OptionalChain:
     case Kind::OptionalForce:
     case Kind::OptionalWrap:
@@ -3880,6 +3884,7 @@ private:
     : ValueAndKind((void*)((uintptr_t)kind << KindPackingBits), Unpacked),
       ComponentType(componentType) {
     assert((unsigned)kind >= (unsigned)Kind::OptionalChain
+           && (unsigned)kind <= (unsigned)Kind::OptionalWrap
            && "not an optional component");
   }
 
@@ -3890,6 +3895,15 @@ private:
     ComponentType(componentType)
   {
   }
+
+  /// Constructor for enum case components.
+  KeyPathPatternComponent(ComputedPropertyId id, SILFunction *extract,
+                          SILFunction *embed, CanType componentType)
+      : ValueAndKind(extract, PackedEnumCase),
+        SetterAndIdKind{embed, id.Kind}, IdValue{id.Value},
+        Indices(), IndexEquality{nullptr, nullptr},
+        ComponentType(componentType), ExternalStorage(nullptr),
+        ExternalSubstitutions() {}
 
 public:
   KeyPathPatternComponent() : ValueAndKind(nullptr, 0) {}
@@ -3919,6 +3933,8 @@ public:
       }
       return Kind::GettableProperty;
     }
+    case PackedEnumCase:
+      return Kind::EnumCase;
     case Unpacked:
       return (Kind)((uintptr_t)ValueAndKind.getPointer() >> KindPackingBits);
     }
@@ -3936,6 +3952,7 @@ public:
     case Kind::GettableProperty:
     case Kind::SettableProperty:
     case Kind::Method:
+    case Kind::EnumCase:
     case Kind::OptionalChain:
     case Kind::OptionalForce:
     case Kind::OptionalWrap:
@@ -3956,6 +3973,7 @@ public:
     case Kind::GettableProperty:
     case Kind::SettableProperty:
     case Kind::Method:
+    case Kind::EnumCase:
       return ComputedPropertyId(IdValue,
                                 SetterAndIdKind.getInt());
     }
@@ -3973,6 +3991,7 @@ public:
     case Kind::GettableProperty:
     case Kind::SettableProperty:
     case Kind::Method:
+    case Kind::EnumCase:
       return static_cast<SILFunction*>(ValueAndKind.getPointer());
     }
     llvm_unreachable("unhandled kind");
@@ -3983,6 +4002,7 @@ public:
     case Kind::StoredProperty:
     case Kind::GettableProperty:
     case Kind::Method:
+    case Kind::EnumCase:
     case Kind::OptionalChain:
     case Kind::OptionalForce:
     case Kind::OptionalWrap:
@@ -3994,6 +4014,16 @@ public:
     llvm_unreachable("unhandled kind");
   }
 
+  SILFunction *getEnumCaseExtractFunction() const {
+    assert(getKind() == Kind::EnumCase && "not an enum case component");
+    return static_cast<SILFunction*>(ValueAndKind.getPointer());
+  }
+
+  SILFunction *getEnumCaseEmbedFunction() const {
+    assert(getKind() == Kind::EnumCase && "not an enum case component");
+    return SetterAndIdKind.getPointer();
+  }
+
   ArrayRef<Index> getArguments() const {
     switch (getKind()) {
     case Kind::StoredProperty:
@@ -4001,6 +4031,7 @@ public:
     case Kind::OptionalForce:
     case Kind::OptionalWrap:
     case Kind::TupleElement:
+    case Kind::EnumCase:
       return {};
     case Kind::GettableProperty:
     case Kind::SettableProperty:
@@ -4018,6 +4049,8 @@ public:
     case Kind::OptionalWrap:
     case Kind::TupleElement:
       llvm_unreachable("not a computed property");
+    case Kind::EnumCase:
+      return nullptr;
     case Kind::GettableProperty:
     case Kind::SettableProperty:
     case Kind::Method:
@@ -4033,6 +4066,8 @@ public:
     case Kind::OptionalWrap:
     case Kind::TupleElement:
       llvm_unreachable("not a computed property");
+    case Kind::EnumCase:
+      return nullptr;
     case Kind::GettableProperty:
     case Kind::SettableProperty:
     case Kind::Method:
@@ -4056,6 +4091,8 @@ public:
     case Kind::OptionalWrap:
     case Kind::TupleElement:
       llvm_unreachable("not a computed property");
+    case Kind::EnumCase:
+      return nullptr;
     case Kind::GettableProperty:
     case Kind::SettableProperty:
     case Kind::Method:
@@ -4072,6 +4109,8 @@ public:
     case Kind::OptionalWrap:
     case Kind::TupleElement:
       llvm_unreachable("not a computed property");
+    case Kind::EnumCase:
+      return SubstitutionMap();
     case Kind::GettableProperty:
     case Kind::SettableProperty:
     case Kind::Method:
@@ -4089,6 +4128,7 @@ public:
     case Kind::GettableProperty:
     case Kind::SettableProperty:
     case Kind::Method:
+    case Kind::EnumCase:
       llvm_unreachable("not a tuple element");
     case Kind::TupleElement:
       return TupleIndex - 1;
@@ -4153,6 +4193,7 @@ public:
     case Kind::GettableProperty:
     case Kind::SettableProperty:
     case Kind::Method:
+    case Kind::EnumCase:
     case Kind::TupleElement:
       llvm_unreachable("not an optional kind");
     }
@@ -4162,6 +4203,14 @@ public:
   static KeyPathPatternComponent forTupleElement(unsigned tupleIndex,
                                                  CanType ty) {
     return KeyPathPatternComponent(tupleIndex, ty);
+  }
+
+  static KeyPathPatternComponent
+  forEnumCase(ComputedPropertyId identifier, SILFunction *extract,
+              SILFunction *embed, CanType ty) {
+    assert(ty->getOptionalObjectType() &&
+           "enum case component must project an Optional");
+    return KeyPathPatternComponent(identifier, extract, embed, ty);
   }
   
   void visitReferencedFunctionsAndMethods(

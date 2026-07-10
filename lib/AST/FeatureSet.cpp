@@ -693,6 +693,7 @@ UNINTERESTING_FEATURE(BorrowingSequence)
 UNINTERESTING_FEATURE(AbstractStoredPropertyLayout)
 
 UNINTERESTING_FEATURE(DeriveConformancesViaMacros)
+UNINTERESTING_FEATURE(CaseKeyPaths)
 
 static bool usesFeatureBorrowInout(Decl *decl) {
   auto &ctx = decl->getASTContext();

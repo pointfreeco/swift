@@ -259,6 +259,10 @@ public:
   /// via key path dynamic member lookup.
   bool isForKeyPathDynamicMemberLookup() const;
 
+  /// Determine whether this locator points to the member found
+  /// via case key path dynamic member lookup.
+  bool isForCaseKeyPathDynamicMemberLookup() const;
+
   /// Determine whether this locator points to element inside
   /// of a key path component.
   bool isInKeyPathComponent() const;

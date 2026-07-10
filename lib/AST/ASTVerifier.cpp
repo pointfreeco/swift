@@ -2443,6 +2443,18 @@ public:
             abort();
           }
           return;
+        } else if (keyPathTy->isCaseKeyPath()) {
+          // CaseKeyPath<T, U> application is rvalue T -> rvalue U?
+          if (!baseTy->isEqual(bgt->getGenericArgs()[0])) {
+            Out << "CaseKeyPath application base doesn't match type\n";
+            abort();
+          }
+          if (!resultTy->isEqual(
+                  OptionalType::get(bgt->getGenericArgs()[1]))) {
+            Out << "CaseKeyPath application result doesn't match type\n";
+            abort();
+          }
+          return;
         } else if (keyPathTy->isWritableKeyPath()) {
           // WritableKeyPath<T, U> application is
           //    lvalue T -> lvalue U

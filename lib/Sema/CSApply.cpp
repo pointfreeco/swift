@@ -359,8 +359,11 @@ static bool buildObjCKeyPathString(KeyPathExpr *E,
         }
         auto objcName = property->getObjCPropertyName().str();
         buf.append(objcName.begin(), objcName.end());
-      }
         continue;
+      }
+      // Other member references (enum cases, methods) have no KVC
+      // representation.
+      return false;
     }
 
     case KeyPathExpr::Component::Kind::Apply:
@@ -2411,6 +2414,10 @@ namespace {
         
             // The result may be an lvalue based on the base and key path kind.
             if (keyPathBGT->isKeyPath()) {
+              resultIsLValue = false;
+              base = cs.coerceToRValue(base);
+            } else if (keyPathBGT->isCaseKeyPath()) {
+              valueTy = OptionalType::get(valueTy);
               resultIsLValue = false;
               base = cs.coerceToRValue(base);
             } else if (keyPathBGT->isWritableKeyPath()) {
@@ -5177,9 +5184,13 @@ namespace {
         auto layout = existential->getExistentialLayout();
         auto keyPathTy = layout.explicitSuperclass->castTo<BoundGenericType>();
         leafTy = keyPathTy->getGenericArgs()[1];
+        if (keyPathTy->isCaseKeyPath())
+          leafTy = OptionalType::get(leafTy);
       } else {
         auto keyPathTy = exprType->castTo<BoundGenericType>();
         leafTy = keyPathTy->getGenericArgs()[1];
+        if (keyPathTy->isCaseKeyPath())
+          leafTy = OptionalType::get(leafTy);
       }
 
       // Track the type of the current component. Once we finish projecting
@@ -5442,6 +5453,10 @@ namespace {
           // Key paths don't work with mutating-get properties.
           assert(!varDecl->isGetterMutating());
         }
+
+        if (auto *element = dyn_cast<EnumElementDecl>(member))
+          resolvedTy =
+              getEnumCaseKeyPathComponentType(ctx, resolvedTy, element);
 
         // Compute the concrete reference to the member.
         auto ref = resolveConcreteDeclRef(member, locator);

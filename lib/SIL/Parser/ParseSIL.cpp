@@ -2513,6 +2513,35 @@ SILParser::parseKeyPathPatternComponent(KeyPathPatternComponent &component,
        return false;
      };
   
+   auto parseComponentId =
+     [&](SourceLoc idLoc, SILFunction *&idFn, SILDeclRef &idDecl,
+         VarDecl *&idProperty) -> bool {
+       // The identifier can be either a function ref, a SILDeclRef
+       // to a class or protocol method or an enum element, or a decl ref
+       // to a property:
+       // @static_fn_ref : $...
+       // #Type.method!whatever : (T) -> ...
+       // #E.case!enumelt : (E.Type) -> (Int) -> E
+       // ##Type.property
+       if (P.Tok.is(tok::at_sign)) {
+         if (parseSILFunctionRef(InstLoc, idFn))
+           return true;
+       } else if (P.Tok.is(tok::pound)) {
+         if (P.peekToken().is(tok::pound)) {
+           ValueDecl *propertyValueDecl;
+           P.consumeToken(tok::pound);
+           if (parseSILDottedPath(propertyValueDecl))
+             return true;
+           idProperty = cast<VarDecl>(propertyValueDecl);
+         } else if (parseSILDeclRef(idDecl, /*fnType*/ true))
+           return true;
+       } else {
+         P.diagnose(idLoc, diag::expected_tok_in_sil_instr, "# or @");
+         return true;
+       }
+       return false;
+     };
+
   if (componentKind.str() == "stored_property") {
     ValueDecl *prop;
     CanType ty;
@@ -2553,27 +2582,8 @@ SILParser::parseKeyPathPatternComponent(KeyPathPatternComponent &component,
         return true;
 
       if (subKind.str() == "id") {
-        // The identifier can be either a function ref, a SILDeclRef
-        // to a class or protocol method, or a decl ref to a property:
-        // @static_fn_ref : $...
-        // #Type.method!whatever : (T) -> ...
-        // ##Type.property
-        if (P.Tok.is(tok::at_sign)) {
-          if (parseSILFunctionRef(InstLoc, idFn))
-            return true;
-        } else if (P.Tok.is(tok::pound)) {
-          if (P.peekToken().is(tok::pound)) {
-            ValueDecl *propertyValueDecl;
-            P.consumeToken(tok::pound);
-            if (parseSILDottedPath(propertyValueDecl))
-              return true;
-            idProperty = cast<VarDecl>(propertyValueDecl);
-          } else if (parseSILDeclRef(idDecl, /*fnType*/ true))
-            return true;
-        } else {
-          P.diagnose(subKindLoc, diag::expected_tok_in_sil_instr, "# or @");
+        if (parseComponentId(subKindLoc, idFn, idDecl, idProperty))
           return true;
-        }
       } else if (subKind.str() == "getter" || subKind.str() == "setter") {
         bool isSetter = subKind.str()[0] == 's';
         if (parseSILFunctionRef(InstLoc, isSetter ? setter : getter))
@@ -2673,6 +2683,52 @@ SILParser::parseKeyPathPatternComponent(KeyPathPatternComponent &component,
                              indexesCopy, equals, hash,
                              externalDecl, externalSubs, componentTy);
     }
+    return false;
+  } else if (componentKind.str() == "enum_case") {
+    CanType componentTy;
+    if (P.parseToken(tok::sil_dollar,diag::expected_tok_in_sil_instr,"$")
+        || parseASTType(componentTy, patternSig, patternParams)
+        || P.parseToken(tok::comma, diag::expected_tok_in_sil_instr, ","))
+      return true;
+
+    SILFunction *idFn = nullptr;
+    SILDeclRef idDecl;
+    VarDecl *idProperty = nullptr;
+    SILFunction *extract = nullptr;
+    SILFunction *embed = nullptr;
+    while (true) {
+      Identifier subKind;
+      SourceLoc subKindLoc;
+      if (parseSILIdentifier(subKind, subKindLoc,
+                             diag::sil_keypath_expected_component_kind))
+        return true;
+
+      if (subKind.str() == "id") {
+        if (parseComponentId(subKindLoc, idFn, idDecl, idProperty))
+          return true;
+      } else if (subKind.str() == "extract" || subKind.str() == "embed") {
+        bool isEmbed = subKind.str()[1] == 'm';
+        if (parseSILFunctionRef(InstLoc, isEmbed ? embed : extract))
+          return true;
+      } else {
+        P.diagnose(subKindLoc, diag::sil_keypath_unknown_component_kind,
+                   subKind);
+        return true;
+      }
+
+      if (!P.consumeIf(tok::comma))
+        break;
+    }
+
+    if (idFn != nullptr || idDecl.isNull() || idProperty != nullptr ||
+        !isa<EnumElementDecl>(idDecl.getDecl()) ||
+        extract == nullptr || embed == nullptr) {
+      P.diagnose(componentLoc, diag::sil_keypath_enum_case_missing_part);
+      return true;
+    }
+
+    component = KeyPathPatternComponent::forEnumCase(idDecl, extract, embed,
+                                                     componentTy);
     return false;
   } else if (componentKind.str() == "optional_wrap"
                || componentKind.str() == "optional_chain"

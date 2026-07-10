@@ -995,8 +995,11 @@ struct KeyPathDynamicMemberConsumer : public VisibleDeclConsumer {
     assert(dynamicLookupInfo.getKind() !=
            DynamicLookupInfo::KeyPathDynamicMember);
 
-    // Only variables and subscripts are allowed in a keypath.
-    if (!isa<AbstractStorageDecl>(VD))
+    // A `CaseKeyPath` subscript surfaces enum cases alone, and other key
+    // path subscripts surface storage and enum cases.
+    if (isCaseKeyPathSubscript(currentSubscript)
+            ? !isa<EnumElementDecl>(VD)
+            : !isa<AbstractStorageDecl>(VD) && !isa<EnumElementDecl>(VD))
       return;
 
     // Dynamic lookup members are only visible if they are not shadowed by
@@ -1004,6 +1007,14 @@ struct KeyPathDynamicMemberConsumer : public VisibleDeclConsumer {
     if (checkShadowed(VD))
       consumer.foundDecl(VD, DeclVisibilityKind::DynamicLookup,
                          {currentSubscript, currentBaseType, reason});
+  }
+
+  static bool isCaseKeyPathSubscript(SubscriptDecl *subscript) {
+    if (!subscript)
+      return false;
+    auto *keyPathType = subscript->getDynamicMemberLookupKeyPathType();
+    return keyPathType && keyPathType->getDecl() ==
+                              subscript->getASTContext().getCaseKeyPathDecl();
   }
 
   struct SubscriptChange {
@@ -1068,6 +1079,7 @@ static void lookupVisibleDynamicMemberLookupDecls(
   dc->lookupQualified(baseType, DeclNameRef::createSubscript(), loc,
                       {NLFlags::QualifiedDefault, NLFlags::ProtocolMembers}, subscripts);
 
+  SmallVector<std::pair<SubscriptDecl *, Type>, 4> dynamicMemberSubscripts;
   for (ValueDecl *VD : subscripts) {
     auto *subscript = dyn_cast<SubscriptDecl>(VD);
     if (!subscript || subscript->getDynamicMemberLookupKind() !=
@@ -1087,13 +1099,40 @@ static void lookupVisibleDynamicMemberLookupDecls(
     if (!memberType->mayHaveMembers())
       continue;
 
+    dynamicMemberSubscripts.emplace_back(subscript, memberType);
+  }
+
+  // Member lookup on an instance base won't produce enum cases, so
+  // report them here, in overload ranking order.
+  auto reportEnumCases = [&](bool viaCaseKeyPath) {
+    if (!dc->getASTContext().LangOpts.hasFeature(Feature::CaseKeyPaths))
+      return;
+    for (auto &[subscript, memberType] : dynamicMemberSubscripts) {
+      if (KeyPathDynamicMemberConsumer::isCaseKeyPathSubscript(subscript) !=
+          viaCaseKeyPath)
+        continue;
+      auto *enumDecl = memberType->getEnumOrBoundGenericEnum();
+      if (!enumDecl)
+        continue;
+      KeyPathDynamicMemberConsumer::SubscriptChange sub(consumer, subscript,
+                                                        baseType);
+      for (auto *element : enumDecl->getAllElements())
+        consumer.foundDecl(element, reason, {});
+    }
+  };
+  reportEnumCases(/*viaCaseKeyPath=*/true);
+
+  for (auto &[subscript, memberType] : dynamicMemberSubscripts) {
+    if (KeyPathDynamicMemberConsumer::isCaseKeyPathSubscript(subscript))
+      continue;
     KeyPathDynamicMemberConsumer::SubscriptChange sub(consumer, subscript,
                                                       baseType);
-
     lookupVisibleMemberAndDynamicMemberDecls(memberType, loc, consumer,
                                              consumer, dc, LS, reason,
                                              visited, seenDynamicLookup);
   }
+
+  reportEnumCases(/*viaCaseKeyPath=*/false);
 }
 
 /// Enumerate all members in \c BaseTy (including members of extensions,

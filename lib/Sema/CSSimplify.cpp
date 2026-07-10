@@ -10920,9 +10920,19 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
 
     } else {
       if (!hasStaticMembers) {
-        result.addUnviable(candidate,
-                           MemberLookupResult::UR_TypeMemberOnInstance);
-        return;
+        // Enum case key path components are resolved against the
+        // instance base.
+        bool isEnumCaseKeyPathComponent =
+            isa<EnumElementDecl>(decl) &&
+            getASTContext().LangOpts.hasFeature(Feature::CaseKeyPaths) &&
+            memberLocator &&
+            (memberLocator->isForKeyPathComponent() ||
+             memberLocator->isForKeyPathDynamicMemberLookup());
+        if (!isEnumCaseKeyPathComponent) {
+          result.addUnviable(candidate,
+                             MemberLookupResult::UR_TypeMemberOnInstance);
+          return;
+        }
       }
     }
 
@@ -10965,8 +10975,16 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
         auto *keyPath = kpElt->getKeyPathDecl();
         if (isSelfRecursiveKeyPathDynamicMemberLookup(*this, baseTy,
                                                       memberLocator)) {
-          excludedDynamicMembers.insert(candidate.getDecl());
-          return;
+          // Enum cases stay reachable through dynamic member lookup on the
+          // enum itself: unlike other members, they have no direct instance
+          // interpretation to recurse into.
+          bool isEnumCaseDynamicMember =
+              isa<EnumElementDecl>(decl) &&
+              getASTContext().LangOpts.hasFeature(Feature::CaseKeyPaths);
+          if (!isEnumCaseDynamicMember) {
+            excludedDynamicMembers.insert(candidate.getDecl());
+            return;
+          }
         }
 
         if (auto *storage = dyn_cast<AbstractStorageDecl>(decl)) {
@@ -13135,12 +13153,16 @@ ConstraintSystem::simplifyKeyPathConstraint(
     if (auto bgt = contextualTy->getAs<BoundGenericType>()) {
       // We can get root and value from a concrete key path type.
       if (!(bgt->isKeyPath() || bgt->isWritableKeyPath() ||
-            bgt->isReferenceWritableKeyPath())) {
+            bgt->isReferenceWritableKeyPath() || bgt->isCaseKeyPath())) {
         return true;
       }
 
       contextualRootTy = bgt->getGenericArgs()[0];
       contextualValueTy = bgt->getGenericArgs()[1];
+
+      // `CaseKeyPath<Root, Value>` projects `Optional<Value>`.
+      if (bgt->isCaseKeyPath())
+        contextualValueTy = OptionalType::get(contextualValueTy);
     }
 
     if (auto fnTy = contextualTy->getAs<FunctionType>()) {
@@ -13372,6 +13394,14 @@ ConstraintSystem::simplifyKeyPathApplicationConstraint(
         return SolutionKind::Error;
 
       return solveRValue();
+    }
+    if (bgt->isCaseKeyPath()) {
+      // Read-only keypath that projects `Optional` of its value type.
+      if (!matchRoot(ConstraintKind::Conversion))
+        return SolutionKind::Error;
+
+      return matchTypes(OptionalType::get(kpValueTy), valueTy,
+                        ConstraintKind::Bind, subflags, locator);
     }
     if (bgt->isWritableKeyPath()) {
       kpRootTy = getFixedTypeRecursive(kpRootTy, flags, /*wantRValueType=*/true);
