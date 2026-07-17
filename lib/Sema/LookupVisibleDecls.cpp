@@ -970,19 +970,40 @@ struct KeyPathDynamicMemberConsumer : public VisibleDeclConsumer {
   VisibleDeclConsumer &consumer;
   std::function<bool(DeclBaseName)> seenStaticBaseName;
   llvm::DenseSet<DeclBaseName> seen;
+  const DeclContext *DC;
 
   SubscriptDecl *currentSubscript = nullptr;
   Type currentBaseType = Type();
 
+  /// Set only when the current subscript's keypath result type constrains
+  /// which members it accepts.
+  Type currentConstrainedRootType = Type();
+
   KeyPathDynamicMemberConsumer(VisibleDeclConsumer &consumer,
+                               const DeclContext *DC,
                                std::function<bool(DeclBaseName)> seenBaseName)
-      : consumer(consumer), seenStaticBaseName(std::move(seenBaseName)) {}
+      : consumer(consumer), seenStaticBaseName(std::move(seenBaseName)),
+        DC(DC) {}
 
   bool checkShadowed(ValueDecl *VD) {
     // Dynamic lookup members are only visible if they are not shadowed by
     // other members.
     return !isa<SubscriptDecl>(VD) && seen.insert(VD->getBaseName()).second &&
            !seenStaticBaseName(VD->getBaseName());
+  }
+
+  /// Whether \p VD's type satisfies the current subscript's keypath result
+  /// type, e.g. 'Box<U>' for 'subscript<U>(dynamicMember: KeyPath<T, Box<U>>)'.
+  bool satisfiesResultConstraint(ValueDecl *VD) {
+    if (!currentConstrainedRootType)
+      return true;
+    auto *VarD = dyn_cast<VarDecl>(VD);
+    if (!VarD)
+      return true;
+    auto memberType = currentConstrainedRootType->getTypeOfMember(VarD);
+    return getElementTypeOfKeypathDynamicMember(currentSubscript,
+                                                currentBaseType, memberType, DC)
+        .has_value();
   }
 
   void onLookupNominalTypeMembers(NominalTypeDecl *NTD,
@@ -999,6 +1020,9 @@ struct KeyPathDynamicMemberConsumer : public VisibleDeclConsumer {
     if (!isa<AbstractStorageDecl>(VD))
       return;
 
+    if (!satisfiesResultConstraint(VD))
+      return;
+
     // Dynamic lookup members are only visible if they are not shadowed by
     // non-dynamic members.
     if (checkShadowed(VD))
@@ -1010,17 +1034,22 @@ struct KeyPathDynamicMemberConsumer : public VisibleDeclConsumer {
     KeyPathDynamicMemberConsumer &consumer;
     SubscriptDecl *oldSubscript;
     Type oldBaseType;
+    Type oldConstrainedRootType;
 
     SubscriptChange(KeyPathDynamicMemberConsumer &consumer,
-                    SubscriptDecl *newSubscript, Type newBaseType)
+                    SubscriptDecl *newSubscript, Type newBaseType,
+                    Type newConstrainedRootType)
         : consumer(consumer), oldSubscript(newSubscript),
-          oldBaseType(newBaseType) {
+          oldBaseType(newBaseType),
+          oldConstrainedRootType(newConstrainedRootType) {
       std::swap(consumer.currentSubscript, oldSubscript);
       std::swap(consumer.currentBaseType, oldBaseType);
+      std::swap(consumer.currentConstrainedRootType, oldConstrainedRootType);
     }
     ~SubscriptChange() {
       consumer.currentSubscript = oldSubscript;
       consumer.currentBaseType = oldBaseType;
+      consumer.currentConstrainedRootType = oldConstrainedRootType;
     }
   };
 };
@@ -1046,6 +1075,36 @@ static void lookupVisibleMemberAndDynamicMemberDecls(
   lookupVisibleDynamicMemberLookupDecls(baseType, loc, dynamicMemberConsumer,
                                         DC, LS, reason, visited,
                                         seenDynamicLookup);
+}
+
+/// Whether the result type of \p subscript's keypath parameter constrains
+/// which members of the keypath's root type can be referenced through it,
+/// e.g. 'KeyPath<T, Box<U>>' or 'KeyPath<T, Int>', but not 'KeyPath<T, U>'.
+static bool keypathResultConstrainsMembers(SubscriptDecl *subscript) {
+  auto resultTy = evaluateOrDefault(
+      subscript->getASTContext().evaluator,
+      RootAndResultTypeOfKeypathDynamicMemberRequest{subscript}, TypePair())
+      .SecondTy;
+  if (!resultTy)
+    return false;
+
+  // A generic parameter of the subscript itself only constrains members if
+  // it has requirements.
+  auto *paramTy = resultTy->getAs<GenericTypeParamType>();
+  auto *genericParams = subscript->getGenericParams();
+  if (!paramTy || !genericParams ||
+      paramTy->getDepth() != genericParams->getParams().front()->getDepth())
+    return true;
+
+  auto *archetype = subscript->getGenericEnvironment()
+                        ->mapTypeIntoEnvironment(paramTy)
+                        ->getAs<ArchetypeType>();
+  if (!archetype || !archetype->getInterfaceType()->isEqual(paramTy) ||
+      archetype->getSuperclass() || archetype->getLayoutConstraint())
+    return true;
+  return llvm::any_of(archetype->getConformsTo(), [](ProtocolDecl *proto) {
+    return !proto->getInvertibleProtocolKind();
+  });
 }
 
 /// Enumerates all keypath dynamic members of \c baseType, as seen from the
@@ -1087,8 +1146,9 @@ static void lookupVisibleDynamicMemberLookupDecls(
     if (!memberType->mayHaveMembers())
       continue;
 
-    KeyPathDynamicMemberConsumer::SubscriptChange sub(consumer, subscript,
-                                                      baseType);
+    KeyPathDynamicMemberConsumer::SubscriptChange sub(
+        consumer, subscript, baseType,
+        keypathResultConstrainsMembers(subscript) ? memberType : Type());
 
     lookupVisibleMemberAndDynamicMemberDecls(memberType, loc, consumer,
                                              consumer, dc, LS, reason,
@@ -1110,7 +1170,7 @@ static void lookupVisibleMemberDecls(
 
   OverrideFilteringConsumer overrideConsumer(BaseTy, CurrDC);
   KeyPathDynamicMemberConsumer dynamicConsumer(
-      Consumer,
+      Consumer, CurrDC,
       [&](DeclBaseName name) { return overrideConsumer.seenBaseName(name); });
 
   VisitedSet Visited;

@@ -33,6 +33,8 @@
 #include "swift/Basic/Statistic.h"
 #include "swift/IDE/TypeCheckCompletionCallback.h"
 #include "swift/Sema/ConstraintSystem.h"
+#include "swift/Sema/IDETypeChecking.h"
+#include "swift/Sema/IDETypeCheckingRequests.h"
 #include "swift/Sema/SolutionResult.h"
 #include "swift/Sema/TypeVariableType.h"
 #include "llvm/ADT/DenseMap.h"
@@ -854,9 +856,9 @@ static Type openTypeParameter(ConstraintSystem &cs,
   return replacement;
 }
 
-static Type replaceArchetypesWithTypeVariables(ConstraintSystem &cs,
-                                               Type t) {
-  llvm::DenseMap<SubstitutableType *, TypeVariableType *> types;
+static Type replaceArchetypesWithTypeVariables(
+    ConstraintSystem &cs, Type t,
+    llvm::DenseMap<SubstitutableType *, TypeVariableType *> &types) {
 
   // FIXME: This operation doesn't really make sense with a generic function type.
   // We should open the signature instead.
@@ -907,8 +909,9 @@ bool TypeChecker::typesSatisfyConstraint(Type type1, Type type2,
 
   ConstraintSystem cs(dc, ConstraintSystemOptions());
   if (openArchetypes) {
-    type1 = replaceArchetypesWithTypeVariables(cs, type1);
-    type2 = replaceArchetypesWithTypeVariables(cs, type2);
+    llvm::DenseMap<SubstitutableType *, TypeVariableType *> types1, types2;
+    type1 = replaceArchetypesWithTypeVariables(cs, type1, types1);
+    type2 = replaceArchetypesWithTypeVariables(cs, type2, types2);
   }
 
   cs.addConstraint(kind, type1, type2, cs.getConstraintLocator({}));
@@ -927,6 +930,54 @@ bool TypeChecker::typesSatisfyConstraint(Type type1, Type type2,
   }
 
   return false;
+}
+
+std::optional<Type>
+swift::getElementTypeOfKeypathDynamicMember(SubscriptDecl *subscript,
+                                            Type baseType, Type memberType,
+                                            const DeclContext *DC) {
+  // The result type of the subscript's keypath parameter, e.g. 'Box<U>' for
+  // 'subscript<U>(dynamicMember member: KeyPath<T, Box<U>>) -> Bag<U>'.
+  auto resultTy = evaluateOrDefault(
+      DC->getASTContext().evaluator,
+      RootAndResultTypeOfKeypathDynamicMemberRequest{subscript}, TypePair())
+      .SecondTy;
+  if (!resultTy || memberType->hasError() || memberType->hasTypeVariable() ||
+      memberType->hasPlaceholder() || baseType->hasTypeVariable() ||
+      baseType->hasPlaceholder())
+    return Type();
+
+  // Substitute the subscript's outer generic parameters with the base type's
+  // generic arguments and map its own parameters to their archetypes, which
+  // carry the subscript's generic requirements.
+  auto subs = baseType->getMemberSubstitutionMap(
+      subscript, subscript->getGenericEnvironment());
+  resultTy = resultTy.subst(subs);
+  auto elementTy = subscript->getElementInterfaceType().subst(subs);
+  if (resultTy->hasError() || elementTy->hasError())
+    return Type();
+
+  // Open the subscript's archetypes into type variables shared between the
+  // keypath result type and the element type, and solve for the member type,
+  // e.g. binding 'U' to 'Point' for a member of type 'Box<Point>'.
+  ConstraintSystem cs(const_cast<DeclContext *>(DC),
+                      ConstraintSystemOptions());
+  llvm::DenseMap<SubstitutableType *, TypeVariableType *> types;
+  auto openedResultTy = replaceArchetypesWithTypeVariables(cs, resultTy, types);
+  auto openedElementTy =
+      replaceArchetypesWithTypeVariables(cs, elementTy, types);
+
+  cs.addConstraint(ConstraintKind::Conversion, memberType, openedResultTy,
+                   cs.getConstraintLocator({}));
+
+  SmallVector<Solution, 4> solutions;
+  if (cs.solve(solutions, FreeTypeVariableBinding::Allow) || solutions.empty())
+    return std::nullopt;
+
+  auto result = solutions.front().simplifyType(openedElementTy);
+  if (result->hasTypeVariable() || result->hasPlaceholder())
+    return Type();
+  return result;
 }
 
 bool TypeChecker::isSubtypeOf(Type type1, Type type2, DeclContext *dc) {
@@ -2138,10 +2189,10 @@ TypeChecker::typeCheckCheckedCast(Type fromType, Type toType,
     if (auto errorTypeProto = Context.getProtocol(KnownProtocolKind::Error)) {
       if (checkConformance(toType, errorTypeProto)) {
         if (nsErrorTy) {
-          if (isSubtypeOf(fromType, nsErrorTy, dc)
+          if (TypeChecker::isSubtypeOf(fromType, nsErrorTy, dc)
               // Don't mask "always true" warnings if NSError is cast to
               // Error itself.
-              && !isSubtypeOf(fromType, toType, dc))
+              && !TypeChecker::isSubtypeOf(fromType, toType, dc))
             return CheckedCastKind::ValueCast;
         }
       }

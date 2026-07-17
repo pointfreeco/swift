@@ -262,9 +262,8 @@ struct BoxedCircle {
 func testGenericResult1(r: GenericResult<BoxedCircle>) {
   r.#^testGenericResult1^#
 }
-// FIXME: the type should be 'GenericResult<Point>'
-// testGenericResult1-DAG: Decl[InstanceVar]/CurrNominal:      center[#Gen1<Point>#]; name=center
-// testGenericResult1-DAG: Decl[InstanceVar]/CurrNominal:      radius[#Gen1<Int>#]; name=radius
+// testGenericResult1-DAG: Decl[InstanceVar]/CurrNominal:      center[#GenericResult<Point>#]; name=center
+// testGenericResult1-DAG: Decl[InstanceVar]/CurrNominal:      radius[#GenericResult<Int>#]; name=radius
 
 class C {
   var someUniqueName: Int = 0
@@ -374,3 +373,81 @@ func testSendableKeyPath(_ x: HasSendableKeyPath<Point>) {
   // SENDABLE_KEYPATH_POINT-DAG: Decl[InstanceVar]/CurrNominal: x[#HasSendableKeyPath<Int>#]; name=x
   // SENDABLE_KEYPATH_POINT-DAG: Decl[InstanceVar]/CurrNominal: y[#HasSendableKeyPath<Int>#]; name=y
 }
+
+// https://github.com/swiftlang/swift/issues/90751
+struct Column<Value> {}
+
+protocol ColumnsDefinition {}
+extension ColumnsDefinition {
+  var rowid: Int { 0 }
+}
+
+struct UserColumns: ColumnsDefinition {
+  let name = Column<String>()
+  let age = Column<Int>()
+  var queryFragment: String { "" }
+}
+
+@dynamicMemberLookup
+struct ColumnPath<Value> {
+  subscript<Member>(dynamicMember keyPath: KeyPath<UserColumns, Column<Member>>) -> ColumnPath<Member> {
+    ColumnPath<Member>()
+  }
+}
+
+func testConstrainedResult1(r: ColumnPath<String>) {
+  r.#^testConstrainedResult1^#
+}
+// testConstrainedResult1-NOT: rowid[#
+// testConstrainedResult1-NOT: queryFragment[#
+// testConstrainedResult1-DAG: Decl[InstanceVar]/CurrNominal: name[#ColumnPath<String>#]; name=name
+// testConstrainedResult1-DAG: Decl[InstanceVar]/CurrNominal: age[#ColumnPath<Int>#]; name=age
+// testConstrainedResult1-NOT: rowid[#
+// testConstrainedResult1-NOT: queryFragment[#
+
+func extractColumn<Member>(_ path: KeyPath<ColumnPath<String>, ColumnPath<Member>>) {}
+
+func testConstrainedResultKeyPath1() {
+  extractColumn(\.#^testConstrainedResultKeyPath1^#)
+}
+// testConstrainedResultKeyPath1-NOT: rowid[#
+// testConstrainedResultKeyPath1-NOT: queryFragment[#
+// testConstrainedResultKeyPath1-DAG: Decl[InstanceVar]/CurrNominal: name[#ColumnPath<String>#]; name=name
+// testConstrainedResultKeyPath1-DAG: Decl[InstanceVar]/CurrNominal: age[#ColumnPath<Int>#]; name=age
+// testConstrainedResultKeyPath1-NOT: rowid[#
+// testConstrainedResultKeyPath1-NOT: queryFragment[#
+
+@dynamicMemberLookup
+struct ConcreteKeyPathResult {
+  subscript(dynamicMember keyPath: KeyPath<UserColumns, Column<Int>>) -> Bool {
+    true
+  }
+}
+
+func testConcreteKeyPathResult1(r: ConcreteKeyPathResult) {
+  r.#^testConcreteKeyPathResult1^#
+}
+// testConcreteKeyPathResult1-NOT: name[#
+// testConcreteKeyPathResult1-NOT: rowid[#
+// testConcreteKeyPathResult1-DAG: Decl[InstanceVar]/CurrNominal: age[#Bool#]; name=age
+// testConcreteKeyPathResult1-NOT: name[#
+// testConcreteKeyPathResult1-NOT: rowid[#
+
+@dynamicMemberLookup
+struct ConstrainedGenericResult<T> {
+  subscript<U: ColumnsDefinition>(dynamicMember keyPath: KeyPath<T, U>) -> U {
+    fatalError()
+  }
+}
+
+struct NestedColumns {
+  var columns: UserColumns
+  var count: Int
+}
+
+func testConstrainedGenericResult1(r: ConstrainedGenericResult<NestedColumns>) {
+  r.#^testConstrainedGenericResult1^#
+}
+// testConstrainedGenericResult1-NOT: count[#
+// testConstrainedGenericResult1-DAG: Decl[InstanceVar]/CurrNominal: columns[#UserColumns#]; name=columns
+// testConstrainedGenericResult1-NOT: count[#

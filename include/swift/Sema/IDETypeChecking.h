@@ -251,6 +251,15 @@ namespace swift {
 
   Type getResultTypeOfKeypathDynamicMember(SubscriptDecl *subscript);
 
+  /// Returns the element type of a keypath dynamic member lookup subscript
+  /// on \p baseType when referencing a root type member of type
+  /// \p memberType, \c None if the member cannot be referenced through the
+  /// subscript, or a null type if the element type cannot be determined.
+  std::optional<Type>
+  getElementTypeOfKeypathDynamicMember(SubscriptDecl *subscript, Type baseType,
+                                       Type memberType,
+                                       const DeclContext *DC);
+
   /// Collect all the protocol requirements that a given declaration can
   ///   provide default implementations for. VD is a declaration in extension
   ///   declaration. Scratch is the buffer to collect those protocol

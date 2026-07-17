@@ -588,9 +588,13 @@ Type CompletionLookup::getTypeOfMember(const ValueDecl *VD,
         auto key = paramTy->getCanonicalType()->castTo<GenericTypeParamType>();
         subs[key] = innerResultTy;
       } else {
-        // FIXME: Handle the case where the KeyPath result is generic.
-        // e.g. 'subscript<U>(dynamicMember: KeyPath<T, Box<U>>) -> Bag<U>'
-        // For now, just return the inner type.
+        // The keyPath result type is generic but not a bare parameter,
+        // e.g. 'subscript<U>(dynamicMember: KeyPath<T, Box<U>>) -> Bag<U>'.
+        // Solve for the subscript's parameters from the member's type.
+        auto elementTy = getElementTypeOfKeypathDynamicMember(
+            SD, keyPathInfo.baseType, innerResultTy, CurrDeclContext);
+        if (elementTy && *elementTy)
+          return *elementTy;
         return innerResultTy;
       }
     }
