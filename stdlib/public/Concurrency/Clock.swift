@@ -40,6 +40,7 @@ public protocol Clock<Duration>: Sendable {
 
 #if !SWIFT_STDLIB_TASK_TO_THREAD_MODEL_CONCURRENCY
   func sleep(until deadline: Instant, tolerance: Instant.Duration?) async throws
+  func sleep(until deadline: Instant, tolerance: Instant.Duration?, isolation: isolated any Actor?) async throws
 #endif
 }
 
@@ -117,11 +118,30 @@ extension Clock {
   /// access to an absolute instant.
   @available(StdlibDeploymentTarget 5.7, *)
   @export(implementation)
-  public func sleep(
+  @abi(
+    func sleep(
+      for duration: Instant.Duration,
+      tolerance: Instant.Duration?
+    ) async throws
+  )
+  public nonisolated(nonsending) func sleep(
     for duration: Instant.Duration,
     tolerance: Instant.Duration? = nil
   ) async throws {
-    try await sleep(until: now.advanced(by: duration), tolerance: tolerance)
+    try await sleep(
+      until: now.advanced(by: duration),
+      tolerance: tolerance,
+      isolation: #isolation
+    )
+  }
+
+  @available(StdlibDeploymentTarget 5.7, *)
+  public func sleep(
+    until deadline: Instant,
+    tolerance: Instant.Duration?,
+    isolation: isolated any Actor? = #isolation
+  ) async throws {
+    try await sleep(until: deadline, tolerance: tolerance)
   }
 }
 #endif

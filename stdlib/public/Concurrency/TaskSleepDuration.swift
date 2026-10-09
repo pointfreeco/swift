@@ -78,6 +78,7 @@ fileprivate func durationComponents<C: Clock>(for duration: C.Duration, clock: C
 extension Task where Success == Never, Failure == Never {
   @available(StdlibDeploymentTarget 5.7, *)
   @diagnose(UselessAvailabilityCheck, as: ignored)
+  nonisolated(nonsending)
   internal static func _sleep<C: Clock>(
     until instant: C.Instant,
     tolerance: C.Duration?,
@@ -218,12 +219,19 @@ extension Task where Success == Never, Failure == Never {
   ///       try await Task.sleep(until: .now + .seconds(3))
   ///
   @available(SwiftStdlib 5.7, *)
-  public static func sleep<C: Clock>(
+  @abi(
+    static func sleep<C: Clock>(
+      until deadline: C.Instant,
+      tolerance: C.Instant.Duration?,
+      clock: C
+    ) async throws
+  )
+  public nonisolated(nonsending) static func sleep<C: Clock>(
     until deadline: C.Instant,
     tolerance: C.Instant.Duration? = nil,
     clock: C = .continuous
   ) async throws {
-    try await clock.sleep(until: deadline, tolerance: tolerance)
+    try await clock.sleep(until: deadline, tolerance: tolerance, isolation: #isolation)
   }
 
   /// Suspends the current task for the given duration.
@@ -237,7 +245,14 @@ extension Task where Success == Never, Failure == Never {
   ///
   @available(SwiftStdlib 5.7, *)
   @export(implementation)
-  public static func sleep<C: Clock>(
+  @abi(
+    static func sleep<C: Clock>(
+      for duration: C.Instant.Duration,
+      tolerance: C.Instant.Duration?,
+      clock: C
+    ) async throws
+  )
+  public nonisolated(nonsending) static func sleep<C: Clock>(
     for duration: C.Instant.Duration,
     tolerance: C.Instant.Duration? = nil,
     clock: C = .continuous
